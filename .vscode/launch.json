@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Android: 构建并运行 --info（输出在终端）",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}\\Core\\scripts\\run-android-info.ps1\"",
+            "cwd": "${workspaceFolder}\\Core",
+            "internalConsoleOptions": "neverOpen"
+        },
+        {
+            "name": "Flutter: 运行 HyperUSB UI",
+            "type": "dart",
+            "request": "launch",
+            "program": "${workspaceFolder}\\UI\\lib\\main.dart",
+            "cwd": "${workspaceFolder}\\UI"
+        }
+    ]
+}

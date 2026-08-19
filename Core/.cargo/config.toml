@@ -1,0 +1,5 @@
+[build]
+target = "aarch64-linux-android"
+
+[target.aarch64-linux-android]
+linker = "C:/Users/Sundar/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android35-clang.cmd"

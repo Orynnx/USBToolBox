@@ -1,0 +1,16 @@
+**/target/
+/.tmp/
+.vs/
+.idea/
+
+# 共享调试配置入库；其余 VS Code 用户级配置保持本地。
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+
+# 本机与编辑器生成的文件
+*.rs.bk
+*.log
+Thumbs.db
+.DS_Store
