@@ -1,6 +1,6 @@
 //! USB Boot Keyboard 核心。
 //!
-//! 包含标准 8 字节键盘 Report、ASCII 按键编码、HID 描述符校验、ConfigFS Function
+//! 包含标准 8 字节键盘 Report、Chord Tap、HID 描述符校验、ConfigFS Function
 //! 配置，以及 `/dev/hidg*` 的顺序写入。所有会修改设备状态的操作都必须由调用方显式
 //! 调用；创建结构体本身不会触碰 ConfigFS。
 
@@ -14,9 +14,6 @@ use crate::usb_sub::{UsbError, UsbResult};
 
 /// Linux HID Gadget 使用的标准 Boot Keyboard Report 长度。
 pub const KEYBOARD_REPORT_LENGTH: usize = 8;
-
-/// NKRO 键盘的位图 Report 长度：修饰键 1 字节、保留字节 1 个、224 个普通 Usage 位。
-pub const NKRO_KEYBOARD_REPORT_LENGTH: usize = 30;
 
 /// Boot Keyboard Report Descriptor，支持 8 个修饰键、5 个 LED 和 6 个普通按键槽位。
 pub const BOOT_KEYBOARD_DESCRIPTOR: [u8; 63] = [
@@ -251,63 +248,6 @@ impl KeyChord {
     }
 }
 
-/// 可用于虚拟键盘的当前按键状态。
-///
-/// 它是纯内存模型；UI 可在按下/松开时更新它，并调用 [`HidKeyboardWriter::write_state`]
-/// 输出完整 Report，从而让 Ctrl 等修饰键在普通键释放后继续保持按下。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct KeyboardState {
-    modifiers: Modifiers,
-    keys: Vec<Key>,
-}
-
-impl KeyboardState {
-    pub fn modifiers(&self) -> Modifiers {
-        self.modifiers
-    }
-
-    pub fn keys(&self) -> &[Key] {
-        &self.keys
-    }
-
-    pub fn set_modifiers(&mut self, modifiers: Modifiers) {
-        self.modifiers = modifiers;
-    }
-
-    pub fn press(&mut self, key: Key) -> UsbResult<()> {
-        if self.keys.contains(&key) {
-            return Ok(());
-        }
-        if self.keys.len() == 6 {
-            return Err(UsbError::InvalidInput(
-                "Boot Keyboard 同时最多保持六个普通按键".into(),
-            ));
-        }
-        self.keys.push(key);
-        Ok(())
-    }
-
-    pub fn release(&mut self, key: Key) -> bool {
-        let Some(index) = self.keys.iter().position(|held| *held == key) else {
-            return false;
-        };
-        self.keys.remove(index);
-        true
-    }
-
-    pub fn release_all(&mut self) {
-        self.modifiers = Modifiers::NONE;
-        self.keys.clear();
-    }
-
-    pub fn report(&self) -> KeyboardReport {
-        KeyboardReport::new(
-            self.modifiers.bits(),
-            self.keys.iter().copied().map(Key::usage),
-        )
-    }
-}
-
 /// 一个完整的 Boot Keyboard 实时状态。
 ///
 /// 字节 0 为修饰键位图，字节 1 保留，后 6 字节为普通按键 Usage。按键会保持按下，
@@ -351,26 +291,6 @@ impl KeyboardReport {
     pub const fn as_bytes(&self) -> &[u8; KEYBOARD_REPORT_LENGTH] {
         &self.0
     }
-}
-
-/// 将标准 US 键盘布局可表示的文本编码为“按下、释放”Report 序列。
-///
-/// 每个字符固定生成两个 Report，确保前一个按键不会在主机端保持按下。无法表示的 Unicode
-/// 字符会返回包含字符位置和码点的错误。
-pub fn encode_text(text: &str) -> UsbResult<Vec<KeyboardReport>> {
-    let mut reports = Vec::with_capacity(text.chars().count() * 2);
-    for (index, character) in text.chars().enumerate() {
-        let (modifier, usage) = key_for_character(character).ok_or_else(|| {
-            UsbError::InvalidInput(format!(
-                "第 {} 个字符无法用标准 USB 键盘发送：U+{:04X}",
-                index + 1,
-                character as u32
-            ))
-        })?;
-        reports.push(KeyboardReport::new(modifier, [usage]));
-        reports.push(KeyboardReport::released());
-    }
-    Ok(reports)
 }
 
 /// HID Function 的配置模型。
@@ -437,10 +357,8 @@ impl UsbHid {
     }
 }
 
-/// 供各类 HID 键盘共享的端点写入器。
-///
-/// 统一处理 Host 就绪检查、非阻塞重试、完整写入校验与 Drop 时的全零释放，Boot/NKRO
-/// 不会各自复制一套容易漂移的 I/O 逻辑。
+/// Boot HID 的端点写入器，统一处理 Host 就绪检查、非阻塞重试、完整写入校验与
+/// Drop 时的全零释放。
 pub(crate) struct HidReportWriter {
     endpoint_path: PathBuf,
     udc_state_path: PathBuf,
@@ -557,42 +475,9 @@ impl HidKeyboardWriter {
         self.inner.write_report(report.as_bytes())
     }
 
-    /// 按顺序发送多个 Report，并在 Report 之间等待指定时间。
-    pub fn write_reports(
-        &mut self,
-        reports: &[KeyboardReport],
-        interval: Duration,
-    ) -> UsbResult<()> {
-        for (index, report) in reports.iter().copied().enumerate() {
-            self.write_report(report)?;
-            if index + 1 < reports.len() && !interval.is_zero() {
-                thread::sleep(interval);
-            }
-        }
-        Ok(())
-    }
-
-    /// 编码并发送文本。
-    pub fn write_text(&mut self, text: &str, interval: Duration) -> UsbResult<()> {
-        let reports = encode_text(text)?;
-        self.write_reports(&reports, interval)
-    }
-
-    /// 按下一个普通键与指定修饰键，并保持该状态直到调用 [`Self::key_up_all`]。
-    pub fn key_down(&mut self, key: Key, modifiers: Modifiers) -> UsbResult<()> {
-        self.write_report(KeyboardReport::new(modifiers.bits(), [key.usage()]))
-    }
-
     /// 释放全部修饰键和普通键。
     pub fn key_up_all(&mut self) -> UsbResult<()> {
         self.write_report(KeyboardReport::released())
-    }
-
-    /// 点按一个普通键：按下后短暂保持，再释放全部按键。
-    pub fn tap(&mut self, key: Key, modifiers: Modifiers) -> UsbResult<()> {
-        self.key_down(key, modifiers)?;
-        thread::sleep(DEFAULT_KEY_HOLD);
-        self.key_up_all()
     }
 
     /// 发送组合键：同时按下所有键，短暂保持，再释放。
@@ -600,19 +485,28 @@ impl HidKeyboardWriter {
     /// `Alt+F4` 可表示为 `KeyChord::new(Modifiers::LEFT_ALT, [Key::F4])`。Windows 对
     /// `Ctrl+Alt+Delete` 等安全注意序列的处理由 Host 决定，但 HID 物理键序列可以表达。
     pub fn send_chord(&mut self, chord: &KeyChord) -> UsbResult<()> {
-        self.write_report(chord.report()?)?;
-        thread::sleep(DEFAULT_KEY_HOLD);
-        self.key_up_all()
-    }
-
-    /// 发送由 UI 或其他上层维护的完整按键状态。
-    pub fn write_state(&mut self, state: &KeyboardState) -> UsbResult<()> {
-        self.write_report(state.report())
+        send_chord_reports(chord, |report| self.write_report(report))
     }
 
     pub fn endpoint_path(&self) -> &Path {
         self.inner.endpoint_path()
     }
+}
+
+fn send_chord_reports(
+    chord: &KeyChord,
+    mut write_report: impl FnMut(KeyboardReport) -> UsbResult<()>,
+) -> UsbResult<()> {
+    if let Err(error) = write_report(chord.report()?) {
+        let _ = write_report(KeyboardReport::released());
+        return Err(error);
+    }
+    thread::sleep(DEFAULT_KEY_HOLD);
+    if let Err(error) = write_report(KeyboardReport::released()) {
+        let _ = write_report(KeyboardReport::released());
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// 根据 ConfigFS HID Function 的 `dev` 设备号解析对应的 `/dev/hidg*` 端点。
@@ -625,55 +519,6 @@ pub fn resolve_hid_endpoint(function_path: impl AsRef<Path>) -> UsbResult<PathBu
         Path::new("/sys/class/hidg"),
         Path::new("/dev"),
     )
-}
-
-fn key_for_character(character: char) -> Option<(u8, u8)> {
-    let key = match character {
-        'a'..='z' => (0, 0x04 + (character as u8 - b'a')),
-        'A'..='Z' => (
-            Modifiers::LEFT_SHIFT.bits(),
-            0x04 + (character as u8 - b'A'),
-        ),
-        '1'..='9' => (0, 0x1e + (character as u8 - b'1')),
-        '0' => (0, 0x27),
-        '\n' | '\r' => (0, 0x28),
-        '\t' => (0, 0x2b),
-        ' ' => (0, 0x2c),
-        '-' => (0, 0x2d),
-        '_' => (Modifiers::LEFT_SHIFT.bits(), 0x2d),
-        '=' => (0, 0x2e),
-        '+' => (Modifiers::LEFT_SHIFT.bits(), 0x2e),
-        '[' => (0, 0x2f),
-        '{' => (Modifiers::LEFT_SHIFT.bits(), 0x2f),
-        ']' => (0, 0x30),
-        '}' => (Modifiers::LEFT_SHIFT.bits(), 0x30),
-        '\\' => (0, 0x31),
-        '|' => (Modifiers::LEFT_SHIFT.bits(), 0x31),
-        ';' => (0, 0x33),
-        ':' => (Modifiers::LEFT_SHIFT.bits(), 0x33),
-        '\'' => (0, 0x34),
-        '"' => (Modifiers::LEFT_SHIFT.bits(), 0x34),
-        '`' => (0, 0x35),
-        '~' => (Modifiers::LEFT_SHIFT.bits(), 0x35),
-        ',' => (0, 0x36),
-        '<' => (Modifiers::LEFT_SHIFT.bits(), 0x36),
-        '.' => (0, 0x37),
-        '>' => (Modifiers::LEFT_SHIFT.bits(), 0x37),
-        '/' => (0, 0x38),
-        '?' => (Modifiers::LEFT_SHIFT.bits(), 0x38),
-        '!' => (Modifiers::LEFT_SHIFT.bits(), 0x1e),
-        '@' => (Modifiers::LEFT_SHIFT.bits(), 0x1f),
-        '#' => (Modifiers::LEFT_SHIFT.bits(), 0x20),
-        '$' => (Modifiers::LEFT_SHIFT.bits(), 0x21),
-        '%' => (Modifiers::LEFT_SHIFT.bits(), 0x22),
-        '^' => (Modifiers::LEFT_SHIFT.bits(), 0x23),
-        '&' => (Modifiers::LEFT_SHIFT.bits(), 0x24),
-        '*' => (Modifiers::LEFT_SHIFT.bits(), 0x25),
-        '(' => (Modifiers::LEFT_SHIFT.bits(), 0x26),
-        ')' => (Modifiers::LEFT_SHIFT.bits(), 0x27),
-        _ => return None,
-    };
-    Some(key)
 }
 
 fn validate_descriptor(descriptor: &[u8]) -> UsbResult<()> {
@@ -855,17 +700,6 @@ mod tests {
     }
 
     #[test]
-    fn text_encoding_emits_press_and_release() {
-        let reports = encode_text("A").unwrap();
-        assert_eq!(reports.len(), 2);
-        assert_eq!(
-            reports[0].as_bytes(),
-            &[Modifiers::LEFT_SHIFT.bits(), 0, 4, 0, 0, 0, 0, 0]
-        );
-        assert_eq!(reports[1], KeyboardReport::released());
-    }
-
-    #[test]
     fn chord_encodes_alt_f4_as_a_single_report() {
         let chord = KeyChord::new(Modifiers::LEFT_ALT, [Key::F4]).unwrap();
         assert_eq!(
@@ -885,22 +719,42 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_state_keeps_modifier_after_releasing_normal_key() {
-        let mut state = KeyboardState::default();
-        state.set_modifiers(Modifiers::LEFT_CTRL);
-        state.press(Key::C).unwrap();
-        assert_eq!(state.report().as_bytes(), &[0x01, 0, 0x06, 0, 0, 0, 0, 0]);
-        assert!(state.release(Key::C));
-        assert_eq!(state.report().as_bytes(), &[0x01, 0, 0, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
     fn chord_rejects_more_than_six_normal_keys() {
         assert!(KeyChord::new(
             Modifiers::NONE,
             [Key::A, Key::B, Key::C, Key::D, Key::E, Key::F, Key::G]
         )
         .is_err());
+    }
+
+    #[test]
+    fn chord_is_successful_only_after_press_and_release() {
+        let chord = KeyChord::new(Modifiers::LEFT_ALT, [Key::F4]).unwrap();
+        let mut reports = Vec::new();
+        send_chord_reports(&chord, |report| {
+            reports.push(report);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[1], KeyboardReport::released());
+    }
+
+    #[test]
+    fn release_failure_is_retried_and_still_returned() {
+        let chord = KeyChord::new(Modifiers::LEFT_CTRL, [Key::C]).unwrap();
+        let mut writes = 0;
+        let error = send_chord_reports(&chord, |_| {
+            writes += 1;
+            if writes == 2 {
+                Err(UsbError::Unavailable("release failed".into()))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(writes, 3);
+        assert_eq!(error.to_string(), "release failed");
     }
 
     #[test]

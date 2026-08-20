@@ -24,6 +24,11 @@ pub fn print() -> Result<(), String> {
     println!("USB Gadget: {}", usb_sub::gadget_status());
     println!("UDC: {}", usb_sub::udc_status());
     println!("UDC writable: {}", usb_sub::udc_writable());
+    println!("USB Host connected: {}", usb_sub::udc_connection_status());
+    println!(
+        "USB Enumeration state: {}",
+        usb_sub::udc_enumeration_state()
+    );
     println!("Executable file path: {executable_path}");
 
     info!("Runtime information report emitted");

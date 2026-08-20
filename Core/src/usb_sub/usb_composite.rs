@@ -13,14 +13,14 @@ use crate::usb_sub::usb_gadget::{
     discover_udc, restore_android_usb_from_state, AndroidUsbLease, UsbGadgetController,
 };
 use crate::usb_sub::usb_hid::{resolve_hid_endpoint, HidKeyboardWriter, UsbHid};
-use crate::usb_sub::usb_model::{UsbProfile, UsbRuntimeConfig, UsbRuntimeState};
-use crate::usb_sub::usb_nkro::{nkro_hid, NkroKeyboardWriter};
+use crate::usb_sub::usb_model::{UsbConfiguration, UsbProfile, UsbRuntimeConfig, UsbRuntimeState};
 use crate::usb_sub::usb_recovery::UsbRecoveryState;
 use crate::usb_sub::usb_storage::UsbStorage;
 use crate::usb_sub::{UsbError, UsbResult};
 
 const HID_INSTANCE: &str = "hid.hyperusb";
-const NKRO_INSTANCE: &str = "hid.nkro";
+/// 旧版本可能在持久 Gadget 中留下这个链接；新版本只负责解除，不再创建 NKRO。
+const LEGACY_NKRO_INSTANCE: &str = "hid.nkro";
 const STORAGE_INSTANCE: &str = "mass_storage.hyperusb";
 
 /// 一个持久的 HyperUSB Composite Gadget。
@@ -48,9 +48,8 @@ impl UsbComposite {
     ) -> UsbResult<()> {
         profile.validate()?;
         info!(
-            "Activating HyperUSB: boot_keyboard={}, nkro_keyboard={}, storage_luns={}, udc={udc}",
+            "Activating HyperUSB: boot_keyboard={}, storage_luns={}, udc={udc}",
             profile.keyboard_enabled,
-            profile.nkro_keyboard_enabled,
             profile.storage_luns.len()
         );
         self.controller.unbind()?;
@@ -58,19 +57,13 @@ impl UsbComposite {
         let result = (|| {
             self.controller.ensure_base(identity)?;
             self.controller.unlink_function(HID_INSTANCE)?;
-            self.controller.unlink_function(NKRO_INSTANCE)?;
+            self.controller.unlink_function(LEGACY_NKRO_INSTANCE)?;
             self.controller.unlink_function(STORAGE_INSTANCE)?;
 
             if profile.keyboard_enabled {
                 let path = self.controller.function_path(HID_INSTANCE)?;
                 UsbHid::default().configure_function(path)?;
                 self.controller.replace_function_link(HID_INSTANCE)?;
-            }
-
-            if profile.nkro_keyboard_enabled {
-                let path = self.controller.function_path(NKRO_INSTANCE)?;
-                nkro_hid().configure_function(path)?;
-                self.controller.replace_function_link(NKRO_INSTANCE)?;
             }
 
             let storage_path = self.controller.function_path(STORAGE_INSTANCE)?;
@@ -104,7 +97,7 @@ impl UsbComposite {
         if let Err(error) = self.controller.unbind() {
             errors.push(error.to_string());
         }
-        for instance in [HID_INSTANCE, NKRO_INSTANCE, STORAGE_INSTANCE] {
+        for instance in [HID_INSTANCE, LEGACY_NKRO_INSTANCE, STORAGE_INSTANCE] {
             if let Err(error) = self.controller.unlink_function(instance) {
                 errors.push(error.to_string());
             }
@@ -131,10 +124,6 @@ impl UsbComposite {
     pub fn hid_endpoint(&self) -> UsbResult<PathBuf> {
         resolve_hid_endpoint(self.controller.function_path(HID_INSTANCE)?)
     }
-
-    pub fn nkro_hid_endpoint(&self) -> UsbResult<PathBuf> {
-        resolve_hid_endpoint(self.controller.function_path(NKRO_INSTANCE)?)
-    }
 }
 
 /// 一次从 Android USB 切换到 HyperUSB、再安全恢复的完整会话。
@@ -142,14 +131,14 @@ pub struct UsbSession {
     composite: UsbComposite,
     android_lease: Option<AndroidUsbLease>,
     config: UsbRuntimeConfig,
-    profile: UsbProfile,
+    configuration: UsbConfiguration,
     udc: String,
     state: UsbRuntimeState,
 }
 
 impl UsbSession {
-    pub fn start(config: UsbRuntimeConfig, profile: UsbProfile) -> UsbResult<Self> {
-        profile.validate()?;
+    pub fn start(config: UsbRuntimeConfig, configuration: UsbConfiguration) -> UsbResult<Self> {
+        configuration.validate()?;
         if UsbRecoveryState::load(&config.recovery_state_path)?.is_some() {
             return Err(UsbError::Unavailable(format!(
                 "发现未恢复的 USB 状态：{}；请先运行 `hyperusbd restore`",
@@ -174,13 +163,16 @@ impl UsbSession {
         )?;
         let composite = UsbComposite::new(controller);
 
-        if let Err(error) =
-            composite.activate(&profile, &config.identity, &udc, config.udc_bind_timeout)
-        {
+        if let Err(error) = composite.activate(
+            &configuration.profile,
+            &configuration.identity,
+            &udc,
+            config.udc_bind_timeout,
+        ) {
             let restore = android_lease.restore();
             return match restore {
                 Ok(()) => Err(error),
-                Err(restore_error) => Err(UsbError::Unavailable(format!(
+                Err(restore_error) => Err(UsbError::RestoreFailed(format!(
                     "启动 HyperUSB 失败：{error}；恢复 Android USB 也失败：{restore_error}"
                 ))),
             };
@@ -189,15 +181,14 @@ impl UsbSession {
         let state = UsbRuntimeState::Active {
             gadget: config.gadget_name.clone(),
             udc: udc.clone(),
-            keyboard_enabled: profile.keyboard_enabled,
-            nkro_keyboard_enabled: profile.nkro_keyboard_enabled,
-            storage_count: profile.storage_luns.len(),
+            keyboard_enabled: configuration.profile.keyboard_enabled,
+            storage_count: configuration.profile.storage_luns.len(),
         };
         Ok(Self {
             composite,
             android_lease: Some(android_lease),
             config,
-            profile,
+            configuration,
             udc,
             state,
         })
@@ -214,7 +205,11 @@ impl UsbSession {
     /// 当前会话实际启用的组合。调用方如需变更，必须通过 [`Self::reconfigure`]，不能
     /// 直接修改这个值后继续向已绑定 Gadget 写入。
     pub fn profile(&self) -> &UsbProfile {
-        &self.profile
+        &self.configuration.profile
+    }
+
+    pub fn configuration(&self) -> &UsbConfiguration {
+        &self.configuration
     }
 
     pub fn udc_state_path(&self) -> PathBuf {
@@ -222,56 +217,59 @@ impl UsbSession {
     }
 
     pub fn open_keyboard(&self) -> UsbResult<HidKeyboardWriter> {
-        if !self.profile.keyboard_enabled {
+        if !self.configuration.profile.keyboard_enabled {
             return Err(UsbError::Unavailable("当前 USB 组合未启用键盘".into()));
         }
         HidKeyboardWriter::open(self.composite.hid_endpoint()?, self.udc_state_path())
     }
 
-    /// 打开 NKRO 键盘端点。它是独立 Function，因此不会与 Boot 键盘共用 `/dev/hidg*`。
-    pub fn open_nkro_keyboard(&self) -> UsbResult<NkroKeyboardWriter> {
-        if !self.profile.nkro_keyboard_enabled {
-            return Err(UsbError::Unavailable(
-                "当前 USB 组合未启用 NKRO 键盘".into(),
-            ));
-        }
-        NkroKeyboardWriter::open(self.composite.nkro_hid_endpoint()?, self.udc_state_path())
-    }
-
-    /// 在同一个 root CLI 会话中替换已启用的 Function 组合。
+    /// 在同一个 Daemon 会话中替换完整 USB 目标配置。
     ///
     /// ConfigFS 只能在 UDC 未绑定时调整 Function；`activate` 已负责解绑、重建链接并
-    /// 重新绑定。若重配失败，本会话立即停止并尝试恢复 Android，避免半配置 Gadget
-    /// 持续占用 UDC。
-    pub fn reconfigure(&mut self, profile: UsbProfile) -> UsbResult<()> {
+    /// 重新绑定。新配置失败时先恢复旧配置；只有旧配置也失败时才恢复 Android USB。
+    pub fn reconfigure(&mut self, configuration: UsbConfiguration) -> UsbResult<()> {
         if matches!(self.state, UsbRuntimeState::Stopped) || self.android_lease.is_none() {
             return Err(UsbError::Unavailable("当前没有活动的 HyperUSB 会话".into()));
         }
-        profile.validate()?;
+        configuration.validate()?;
+        let previous = self.configuration.clone();
         if let Err(error) = self.composite.activate(
-            &profile,
-            &self.config.identity,
+            &configuration.profile,
+            &configuration.identity,
             &self.udc,
             self.config.udc_bind_timeout,
         ) {
-            let stop_error = self.stop_inner().err();
-            return match stop_error {
-                Some(stop_error) => Err(UsbError::Unavailable(format!(
-                    "重新配置 HyperUSB 失败：{error}；恢复 Android USB 也失败：{stop_error}"
-                ))),
-                None => Err(error),
-            };
+            match self.composite.activate(
+                &previous.profile,
+                &previous.identity,
+                &self.udc,
+                self.config.udc_bind_timeout,
+            ) {
+                Ok(()) => return Err(error),
+                Err(rollback_error) => {
+                    let stop_error = self.stop_inner().err();
+                    return Err(UsbError::RestoreFailed(format!(
+                        "新配置应用失败：{error}；旧配置恢复失败：{rollback_error}{}",
+                        stop_error
+                            .map(|value| format!("；Android USB 恢复也失败：{value}"))
+                            .unwrap_or_default()
+                    )));
+                }
+            }
         }
 
-        self.profile = profile;
+        self.configuration = configuration;
+        self.refresh_state();
+        Ok(())
+    }
+
+    fn refresh_state(&mut self) {
         self.state = UsbRuntimeState::Active {
             gadget: self.config.gadget_name.clone(),
             udc: self.udc.clone(),
-            keyboard_enabled: self.profile.keyboard_enabled,
-            nkro_keyboard_enabled: self.profile.nkro_keyboard_enabled,
-            storage_count: self.profile.storage_luns.len(),
+            keyboard_enabled: self.configuration.profile.keyboard_enabled,
+            storage_count: self.configuration.profile.storage_luns.len(),
         };
-        Ok(())
     }
 
     /// 恢复异常退出时遗留的 Android USB 状态。
@@ -323,8 +321,11 @@ impl UsbSession {
 
         match (deactivate, restore) {
             (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(deactivate_error), Err(restore_error)) => Err(UsbError::Unavailable(format!(
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(restore_error)) => Err(UsbError::RestoreFailed(format!(
+                "恢复 Android USB 失败：{restore_error}"
+            ))),
+            (Err(deactivate_error), Err(restore_error)) => Err(UsbError::RestoreFailed(format!(
                 "停用 HyperUSB 失败：{deactivate_error}；恢复 Android USB 也失败：{restore_error}"
             ))),
         }

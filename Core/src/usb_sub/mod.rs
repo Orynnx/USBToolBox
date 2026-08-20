@@ -8,15 +8,14 @@
 //! - 其余模块只负责 ConfigFS、HID 或具体 Function 的底层操作。
 
 pub mod usb_composite;
+pub mod usb_config;
+pub mod usb_daemon;
 pub mod usb_gadget;
 pub mod usb_hid;
 pub mod usb_model;
-pub mod usb_ncm;
-pub mod usb_nkro;
+pub mod usb_protocol;
 pub mod usb_recovery;
-pub mod usb_serial;
 pub mod usb_storage;
-pub mod usb_uvc;
 
 use std::fmt;
 
@@ -24,23 +23,20 @@ use std::fmt;
 pub use usb_composite::{UsbComposite, UsbSession};
 #[allow(unused_imports)]
 pub use usb_gadget::{
-    configfs_status, gadget_status, udc_status, udc_writable, AndroidUsbLease, GadgetIdentity,
-    UsbGadgetController,
+    configfs_status, gadget_status, udc_connection_status, udc_enumeration_state, udc_status,
+    udc_writable, AndroidUsbLease, GadgetIdentity, UsbGadgetController,
 };
 #[allow(unused_imports)]
 pub use usb_hid::{
-    encode_text, resolve_hid_endpoint, HidKeyboardWriter, Key, KeyChord, KeyboardReport,
-    KeyboardState, Modifiers, UsbHid, BOOT_KEYBOARD_DESCRIPTOR, KEYBOARD_REPORT_LENGTH,
-    NKRO_KEYBOARD_REPORT_LENGTH,
+    resolve_hid_endpoint, HidKeyboardWriter, Key, KeyChord, KeyboardReport, Modifiers, UsbHid,
+    BOOT_KEYBOARD_DESCRIPTOR, KEYBOARD_REPORT_LENGTH,
 };
 #[allow(unused_imports)]
-pub use usb_model::{UsbProfile, UsbRuntimeConfig, UsbRuntimeState};
-#[allow(unused_imports)]
-pub use usb_nkro::{
-    nkro_hid, NkroKeyboardReport, NkroKeyboardState, NkroKeyboardWriter, NKRO_KEYBOARD_DESCRIPTOR,
+pub use usb_model::{
+    UsbConfiguration, UsbProfile, UsbRuntimeConfig, UsbRuntimeState, UsbTargetState,
 };
 #[allow(unused_imports)]
-pub use usb_recovery::{UsbRecoveryState, DEFAULT_USB_STATE_PATH};
+pub use usb_recovery::{UsbRecoveryState, DEFAULT_USB_STATE_PATH, LEGACY_USB_STATE_PATH};
 #[allow(unused_imports)]
 pub use usb_storage::{StorageLun, UsbStorage};
 
@@ -63,6 +59,8 @@ pub enum UsbError {
     TimedOut(&'static str),
     /// HID Report 必须原子写入，但内核只接收了部分内容。
     PartialWrite { expected: usize, actual: usize },
+    /// HyperUSB 和旧配置均无法恢复，Android USB 恢复结果不可信。
+    RestoreFailed(String),
     /// 文件系统或设备节点 I/O 错误。
     Io(std::io::Error),
 }
@@ -71,9 +69,9 @@ impl fmt::Display for UsbError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported(message) => formatter.write_str(message),
-            Self::InvalidInput(message) | Self::Unavailable(message) => {
-                formatter.write_str(message)
-            }
+            Self::InvalidInput(message)
+            | Self::Unavailable(message)
+            | Self::RestoreFailed(message) => formatter.write_str(message),
             Self::CommandFailed {
                 program,
                 status,

@@ -21,7 +21,7 @@ const CONFIGFS_ROOTS: [&str; 2] = ["/config/usb_gadget", "/sys/kernel/config/usb
 static USB_OWNERSHIP_LOCK: Mutex<()> = Mutex::new(());
 
 /// Host 可见的 USB 设备描述信息。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GadgetIdentity {
     pub vendor_id: u16,
     pub product_id: u16,
@@ -494,6 +494,34 @@ pub fn gadget_status() -> &'static str {
 
 pub fn udc_status() -> String {
     discover_udc().unwrap_or_else(|_| "Unavailable".into())
+}
+
+/// 返回当前 USB Device Controller 是否已被 USB Host 连接并枚举。
+pub fn udc_connection_status() -> String {
+    let Ok(udc) = discover_udc() else {
+        return "Unavailable".into();
+    };
+    let state_path = Path::new("/sys/class/udc").join(udc).join("state");
+    match fs::read_to_string(state_path) {
+        Ok(state) => match state.trim() {
+            "configured" | "suspended" => "Yes".into(),
+            "attached" => "Connecting".into(),
+            "not attached" => "No".into(),
+            other if !other.is_empty() => format!("Unknown ({other})"),
+            _ => "Unavailable".into(),
+        },
+        Err(_) => "Unavailable".into(),
+    }
+}
+
+pub fn udc_enumeration_state() -> String {
+    let Ok(udc) = discover_udc() else {
+        return "Unavailable".into();
+    };
+    match fs::read_to_string(Path::new("/sys/class/udc").join(udc).join("state")) {
+        Ok(state) if !state.trim().is_empty() => state.trim().to_owned(),
+        _ => "Unavailable".into(),
+    }
 }
 
 pub fn udc_writable() -> &'static str {

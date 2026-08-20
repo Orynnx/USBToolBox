@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::usb_sub::{UsbError, UsbResult};
 
 /// Android 设备上默认的持久恢复状态位置。
-pub const DEFAULT_USB_STATE_PATH: &str = "/data/adb/hyperusb/usb_state.json";
+pub const DEFAULT_USB_STATE_PATH: &str = "/data/adb/usb_sub/usb_state.json";
+pub const LEGACY_USB_STATE_PATH: &str = "/data/adb/hyperusb/usb_state.json";
 
 /// 接管前读取到的 Android USB 属性。
 ///
@@ -37,11 +38,19 @@ impl UsbRecoveryState {
 
         let temporary = temporary_path(path);
         let write_result = (|| -> UsbResult<()> {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&temporary)?;
+            let mut options = OpenOptions::new();
+            options.create(true).write(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
             serde_json::to_writer_pretty(&mut file, self)
                 .map_err(|error| UsbError::InvalidInput(format!("序列化恢复状态失败：{error}")))?;
             file.write_all(b"\n")?;
