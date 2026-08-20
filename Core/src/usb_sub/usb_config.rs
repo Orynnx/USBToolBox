@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::usb_sub::usb_protocol::{ApiError, ApiErrorCode, ApiResult};
-use crate::usb_sub::{GadgetIdentity, StorageLun, UsbConfiguration, UsbProfile, UsbTargetState};
+use crate::usb_sub::{
+    GadgetIdentity, StorageLun, UsbConfiguration, UsbProfile, UsbTargetState, UvcConfig, UvcFormat,
+    UvcFormatKind, UvcFrame,
+};
 
 pub const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
@@ -20,6 +23,10 @@ struct ConfigFile {
     disk: DiskConfig,
     #[serde(default)]
     keyboard: KeyboardConfig,
+    #[serde(default)]
+    serial: SerialConfig,
+    #[serde(default)]
+    uvc: UvcFileConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +62,35 @@ struct DiskConfig {
 struct KeyboardConfig {
     #[serde(default)]
     boot: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SerialConfig {
+    #[serde(default)]
+    enabled: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvcFileConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    formats: Vec<UvcFormatFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UvcFormatFile {
+    format: String,
+    #[serde(default)]
+    frames: Vec<UvcFrameFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UvcFrameFile {
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    fps: Vec<u32>,
 }
 
 pub fn load_configuration(path: &Path) -> ApiResult<UsbTargetState> {
@@ -150,6 +186,8 @@ pub fn parse_configuration(snapshot: &[u8]) -> ApiResult<UsbTargetState> {
 
     let profile = UsbProfile {
         keyboard_enabled: config.keyboard.boot,
+        serial_enabled: config.serial.enabled,
+        uvc: parse_uvc_config(config.uvc)?,
         storage_luns,
     };
     if !profile.has_functions() {
@@ -187,6 +225,78 @@ pub fn parse_configuration(snapshot: &[u8]) -> ApiResult<UsbTargetState> {
         .validate()
         .map_err(|error| ApiError::new(ApiErrorCode::InvalidConfig, error.to_string()))?;
     Ok(UsbTargetState::HyperUsb(configuration))
+}
+
+fn parse_uvc_config(config: UvcFileConfig) -> ApiResult<Option<UvcConfig>> {
+    if !config.enabled {
+        return Ok(None);
+    }
+
+    let mut formats: Vec<UvcFormat> = Vec::new();
+    for raw_format in config.formats {
+        let format = match raw_format.format.trim().to_ascii_lowercase().as_str() {
+            "mjpeg" => UvcFormatKind::Mjpeg,
+            "yuyv" => UvcFormatKind::Yuyv,
+            other => {
+                return Err(invalid_uvc(format!(
+                    "不支持的 format：{other}，第一版只支持 mjpeg 和 yuyv"
+                )))
+            }
+        };
+        let target = if let Some(existing) = formats.iter_mut().find(|item| item.format == format) {
+            existing
+        } else {
+            formats.push(UvcFormat {
+                format,
+                frames: Vec::new(),
+            });
+            formats.last_mut().expect("format was just pushed")
+        };
+
+        for raw_frame in raw_format.frames {
+            let frame = UvcFrame {
+                width: raw_frame.width,
+                height: raw_frame.height,
+                fps: deduplicate(raw_frame.fps),
+            };
+            if let Some(existing) = target
+                .frames
+                .iter_mut()
+                .find(|item| item.width == frame.width && item.height == frame.height)
+            {
+                for fps in frame.fps {
+                    if !existing.fps.contains(&fps) {
+                        existing.fps.push(fps);
+                    }
+                }
+            } else {
+                target.frames.push(frame);
+            }
+        }
+    }
+
+    let config = UvcConfig { formats };
+    config
+        .validate()
+        .map_err(|error| invalid_uvc(error.to_string()))?;
+    Ok(Some(config))
+}
+
+fn deduplicate(values: Vec<u32>) -> Vec<u32> {
+    let mut unique = Vec::with_capacity(values.len());
+    for value in values {
+        if !unique.contains(&value) {
+            unique.push(value);
+        }
+    }
+    unique
+}
+
+fn invalid_uvc(message: impl Into<String>) -> ApiError {
+    ApiError::new(
+        ApiErrorCode::InvalidConfig,
+        format!("UVC 配置无效：{}", message.into()),
+    )
 }
 
 fn parse_hex_id(value: &str, code: ApiErrorCode, label: &str) -> ApiResult<u16> {
@@ -332,6 +442,7 @@ mod tests {
         for json in [
             br#"{}"#.as_slice(),
             br#"{"keyboard":{"boot":false},"disk":{"enabled":false}}"#,
+            br#"{"uvc":{"enabled":false,"formats":[{"format":"not-supported","frames":[]}]}}"#,
             br#"{"device":{"serialNumber":"","vid":"invalid"}}"#,
         ] {
             assert_eq!(
@@ -345,6 +456,8 @@ mod tests {
     fn active_functions_require_non_empty_serial() {
         for json in [
             br#"{"keyboard":{"boot":true}}"#.as_slice(),
+            br#"{"serial":{"enabled":true}}"#.as_slice(),
+            br#"{"uvc":{"enabled":true,"formats":[]}}"#.as_slice(),
             br#"{"device":{},"keyboard":{"boot":true}}"#,
             br#"{"device":{"serialNumber":""},"keyboard":{"boot":true}}"#,
         ] {
@@ -378,10 +491,99 @@ mod tests {
         for json in [
             br#"{"device":{"serialNumber":123},"keyboard":{"boot":true}}"#.as_slice(),
             br#"{"device":{"serialNumber":"TEST"},"keyboard":{"boot":"yes"}}"#,
+            br#"{"device":{"serialNumber":"TEST"},"serial":{"enabled":"yes"}}"#,
+            br#"{"device":{"serialNumber":"TEST"},"uvc":{"enabled":"yes"}}"#,
+            br#"{"device":{"serialNumber":"TEST"},"uvc":{"enabled":true,"formats":[{"format":"mjpeg","frames":[{"width":"1280","height":720,"fps":[30]}]}]}}"#,
             br#"{"device":{"serialNumber":"TEST"},"disk":{"enabled":false,"cdrom":1},"keyboard":{"boot":true}}"#,
         ] {
             assert_eq!(
                 parse_configuration(json).unwrap_err().code,
+                ApiErrorCode::InvalidConfig
+            );
+        }
+    }
+
+    #[test]
+    fn parses_serial_only_profile_without_line_coding_options() {
+        let config = active(
+            parse_configuration(
+                br#"{
+                    "device":{"serialNumber":"SERIAL-1"},
+                    "serial":{"enabled":true}
+                }"#,
+            )
+            .unwrap(),
+        );
+        assert!(config.profile.serial_enabled);
+        assert!(!config.profile.keyboard_enabled);
+        assert!(config.profile.storage_luns.is_empty());
+    }
+
+    #[test]
+    fn normalizes_uvc_formats_frames_and_fps() {
+        let json = serde_json::json!({
+            "device": {"serialNumber": "UVC-1"},
+            "uvc": {
+                "enabled": true,
+                "formats": [
+                    {
+                        "format": " MJPEG ",
+                        "frames": [
+                            {"width": 1280, "height": 720, "fps": [30, 60, 30]},
+                            {"width": 1280, "height": 720, "fps": [60, 24]}
+                        ]
+                    },
+                    {
+                        "format": "mjpeg",
+                        "frames": [
+                            {"width": 1920, "height": 1080, "fps": [30]}
+                        ]
+                    },
+                    {
+                        "format": "YUYV",
+                        "frames": [
+                            {"width": 640, "height": 480, "fps": [30]}
+                        ]
+                    }
+                ]
+            }
+        });
+        let config = active(parse_configuration(&serde_json::to_vec(&json).unwrap()).unwrap());
+
+        assert_eq!(config.profile.uvc.as_ref().unwrap().formats.len(), 2);
+        let mjpeg = &config.profile.uvc.as_ref().unwrap().formats[0];
+        assert_eq!(mjpeg.format, UvcFormatKind::Mjpeg);
+        assert_eq!(mjpeg.frames.len(), 2);
+        assert_eq!(mjpeg.frames[0].fps, vec![30, 60, 24]);
+        assert_eq!(mjpeg.frames[1].fps, vec![30]);
+        assert_eq!(
+            config.profile.uvc.as_ref().unwrap().formats[1].format,
+            UvcFormatKind::Yuyv
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_enabled_uvc_semantics() {
+        let invalid_configs = [
+            serde_json::json!({
+                "device": {"serialNumber": "UVC-1"},
+                "uvc": {"enabled": true, "formats": [{"format": "h264", "frames": []}]}
+            }),
+            serde_json::json!({
+                "device": {"serialNumber": "UVC-1"},
+                "uvc": {"enabled": true, "formats": [{"format": "mjpeg", "frames": [{"width": 0, "height": 720, "fps": [30]}]}]}
+            }),
+            serde_json::json!({
+                "device": {"serialNumber": "UVC-1"},
+                "uvc": {"enabled": true, "formats": [{"format": "yuyv", "frames": [{"width": 640, "height": 480, "fps": []}]}]}
+            }),
+        ];
+
+        for json in invalid_configs {
+            assert_eq!(
+                parse_configuration(&serde_json::to_vec(&json).unwrap())
+                    .unwrap_err()
+                    .code,
                 ApiErrorCode::InvalidConfig
             );
         }

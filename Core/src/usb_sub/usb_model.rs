@@ -33,19 +33,115 @@ pub enum UsbTargetState {
     HyperUsb(UsbConfiguration),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UvcFormatKind {
+    Mjpeg,
+    Yuyv,
+}
+
+impl UvcFormatKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mjpeg => "mjpeg",
+            Self::Yuyv => "yuyv",
+        }
+    }
+
+    pub const fn configfs_group(self) -> &'static str {
+        match self {
+            Self::Mjpeg => "mjpeg",
+            Self::Yuyv => "uncompressed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UvcFrame {
+    pub width: u32,
+    pub height: u32,
+    pub fps: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UvcFormat {
+    pub format: UvcFormatKind,
+    pub frames: Vec<UvcFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UvcConfig {
+    pub formats: Vec<UvcFormat>,
+}
+
+impl UvcConfig {
+    pub fn validate(&self) -> UsbResult<()> {
+        if self.formats.is_empty() {
+            return Err(crate::usb_sub::UsbError::InvalidInput(
+                "UVC enabled=true 时 formats 至少需要一个格式".into(),
+            ));
+        }
+
+        for format in &self.formats {
+            if format.frames.is_empty() {
+                return Err(crate::usb_sub::UsbError::InvalidInput(format!(
+                    "UVC 格式 {} 至少需要一个 frame",
+                    format.format.as_str()
+                )));
+            }
+            for frame in &format.frames {
+                if frame.width == 0 || frame.height == 0 {
+                    return Err(crate::usb_sub::UsbError::InvalidInput(
+                        "UVC frame 的 width 和 height 必须大于零".into(),
+                    ));
+                }
+                if frame.width > u16::MAX as u32 || frame.height > u16::MAX as u32 {
+                    return Err(crate::usb_sub::UsbError::InvalidInput(
+                        "UVC frame 的 width 和 height 不能超过 65535".into(),
+                    ));
+                }
+                let buffer_size = u64::from(frame.width) * u64::from(frame.height) * 2;
+                if buffer_size > u64::from(u32::MAX) {
+                    return Err(crate::usb_sub::UsbError::InvalidInput(
+                        "UVC frame 的最大缓冲区大小超过 ConfigFS 支持范围".into(),
+                    ));
+                }
+                if frame.fps.is_empty() || frame.fps.contains(&0) {
+                    return Err(crate::usb_sub::UsbError::InvalidInput(
+                        "UVC frame 的 fps 至少需要一个且全部大于零".into(),
+                    ));
+                }
+                if frame.fps.iter().any(|fps| *fps > 10_000_000) {
+                    return Err(crate::usb_sub::UsbError::InvalidInput(
+                        "UVC frame 的 fps 不能超过 10000000".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 当前真正支持的 USB Function 组合。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsbProfile {
     pub keyboard_enabled: bool,
+    pub serial_enabled: bool,
+    pub uvc: Option<UvcConfig>,
     pub storage_luns: Vec<StorageLun>,
 }
 
 impl UsbProfile {
     pub fn has_functions(&self) -> bool {
-        self.keyboard_enabled || !self.storage_luns.is_empty()
+        self.keyboard_enabled
+            || self.serial_enabled
+            || self.uvc.is_some()
+            || !self.storage_luns.is_empty()
     }
 
     pub fn validate(&self) -> UsbResult<()> {
+        if let Some(uvc) = &self.uvc {
+            uvc.validate()?;
+        }
         for lun in &self.storage_luns {
             lun.validate()?;
         }
@@ -91,6 +187,8 @@ pub enum UsbRuntimeState {
         gadget: String,
         udc: String,
         keyboard_enabled: bool,
+        serial_enabled: bool,
+        uvc_enabled: bool,
         storage_count: usize,
     },
 }
@@ -113,6 +211,8 @@ mod tests {
     fn boot_or_storage_makes_profile_valid() {
         UsbProfile {
             keyboard_enabled: true,
+            serial_enabled: false,
+            uvc: None,
             storage_luns: Vec::new(),
         }
         .validate()
@@ -120,6 +220,8 @@ mod tests {
 
         UsbProfile {
             keyboard_enabled: false,
+            serial_enabled: false,
+            uvc: None,
             storage_luns: vec![StorageLun::ejected_disk()],
         }
         .validate()

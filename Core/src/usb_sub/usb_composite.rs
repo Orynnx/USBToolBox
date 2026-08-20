@@ -15,12 +15,15 @@ use crate::usb_sub::usb_gadget::{
 use crate::usb_sub::usb_hid::{resolve_hid_endpoint, HidKeyboardWriter, UsbHid};
 use crate::usb_sub::usb_model::{UsbConfiguration, UsbProfile, UsbRuntimeConfig, UsbRuntimeState};
 use crate::usb_sub::usb_recovery::UsbRecoveryState;
+use crate::usb_sub::usb_serial::UsbSerial;
 use crate::usb_sub::usb_storage::UsbStorage;
-use crate::usb_sub::{UsbError, UsbResult};
+use crate::usb_sub::{UsbError, UsbResult, UsbUvc, UsbUvcRuntime, UvcConfig, UvcFormatKind};
 
 const HID_INSTANCE: &str = "hid.hyperusb";
 /// 旧版本可能在持久 Gadget 中留下这个链接；新版本只负责解除，不再创建 NKRO。
 const LEGACY_NKRO_INSTANCE: &str = "hid.nkro";
+const SERIAL_INSTANCE: &str = "acm.hyperusb";
+const UVC_INSTANCE: &str = "uvc.hyperusb";
 const STORAGE_INSTANCE: &str = "mass_storage.hyperusb";
 
 /// 一个持久的 HyperUSB Composite Gadget。
@@ -48,8 +51,10 @@ impl UsbComposite {
     ) -> UsbResult<()> {
         profile.validate()?;
         info!(
-            "Activating HyperUSB: boot_keyboard={}, storage_luns={}, udc={udc}",
+            "Activating HyperUSB: boot_keyboard={}, serial={}, uvc_formats={}, storage_luns={}, udc={udc}",
             profile.keyboard_enabled,
+            profile.serial_enabled,
+            profile.uvc.as_ref().map_or(0, |uvc| uvc.formats.len()),
             profile.storage_luns.len()
         );
         self.controller.unbind()?;
@@ -58,12 +63,26 @@ impl UsbComposite {
             self.controller.ensure_base(identity)?;
             self.controller.unlink_function(HID_INSTANCE)?;
             self.controller.unlink_function(LEGACY_NKRO_INSTANCE)?;
+            self.controller.unlink_function(SERIAL_INSTANCE)?;
+            self.controller.unlink_function(UVC_INSTANCE)?;
             self.controller.unlink_function(STORAGE_INSTANCE)?;
 
             if profile.keyboard_enabled {
                 let path = self.controller.function_path(HID_INSTANCE)?;
                 UsbHid::default().configure_function(path)?;
                 self.controller.replace_function_link(HID_INSTANCE)?;
+            }
+
+            if profile.serial_enabled {
+                let path = self.controller.function_path(SERIAL_INSTANCE)?;
+                UsbSerial.configure_function(path)?;
+                self.controller.replace_function_link(SERIAL_INSTANCE)?;
+            }
+
+            if let Some(uvc) = &profile.uvc {
+                let path = self.controller.function_path(UVC_INSTANCE)?;
+                UsbUvc.configure_function(path, uvc)?;
+                self.controller.replace_function_link(UVC_INSTANCE)?;
             }
 
             let storage_path = self.controller.function_path(STORAGE_INSTANCE)?;
@@ -97,7 +116,13 @@ impl UsbComposite {
         if let Err(error) = self.controller.unbind() {
             errors.push(error.to_string());
         }
-        for instance in [HID_INSTANCE, LEGACY_NKRO_INSTANCE, STORAGE_INSTANCE] {
+        for instance in [
+            HID_INSTANCE,
+            LEGACY_NKRO_INSTANCE,
+            SERIAL_INSTANCE,
+            UVC_INSTANCE,
+            STORAGE_INSTANCE,
+        ] {
             if let Err(error) = self.controller.unlink_function(instance) {
                 errors.push(error.to_string());
             }
@@ -124,6 +149,10 @@ impl UsbComposite {
     pub fn hid_endpoint(&self) -> UsbResult<PathBuf> {
         resolve_hid_endpoint(self.controller.function_path(HID_INSTANCE)?)
     }
+
+    pub fn serial_endpoint(&self) -> UsbResult<PathBuf> {
+        UsbSerial::endpoint_path(self.controller.function_path(SERIAL_INSTANCE)?)
+    }
 }
 
 /// 一次从 Android USB 切换到 HyperUSB、再安全恢复的完整会话。
@@ -133,6 +162,7 @@ pub struct UsbSession {
     config: UsbRuntimeConfig,
     configuration: UsbConfiguration,
     udc: String,
+    uvc_runtime: UsbUvcRuntime,
     state: UsbRuntimeState,
 }
 
@@ -178,10 +208,40 @@ impl UsbSession {
             };
         }
 
+        let uvc_runtime = match UsbUvcRuntime::start(configuration.profile.uvc.as_ref()) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                // Runtime startup happens after ConfigFS activation. Always unbind the
+                // composite gadget before restoring Android's USB state.
+                let deactivate = composite.deactivate();
+                let restore = android_lease.restore();
+                match (deactivate, restore) {
+                    (Ok(()), Ok(())) => return Err(error),
+                    (Err(deactivate_error), Ok(())) => {
+                        return Err(UsbError::RestoreFailed(format!(
+                            "启动 UVC Runtime 失败：{error}；停用 HyperUSB 失败：{deactivate_error}"
+                        )));
+                    }
+                    (Ok(()), Err(restore_error)) => {
+                        return Err(UsbError::RestoreFailed(format!(
+                            "启动 UVC Runtime 失败：{error}；恢复 Android USB 也失败：{restore_error}"
+                        )));
+                    }
+                    (Err(deactivate_error), Err(restore_error)) => {
+                        return Err(UsbError::RestoreFailed(format!(
+                            "启动 UVC Runtime 失败：{error}；停用 HyperUSB 失败：{deactivate_error}；恢复 Android USB 也失败：{restore_error}"
+                        )));
+                    }
+                }
+            }
+        };
+
         let state = UsbRuntimeState::Active {
             gadget: config.gadget_name.clone(),
             udc: udc.clone(),
             keyboard_enabled: configuration.profile.keyboard_enabled,
+            serial_enabled: configuration.profile.serial_enabled,
+            uvc_enabled: configuration.profile.uvc.is_some(),
             storage_count: configuration.profile.storage_luns.len(),
         };
         Ok(Self {
@@ -190,6 +250,7 @@ impl UsbSession {
             config,
             configuration,
             udc,
+            uvc_runtime,
             state,
         })
     }
@@ -221,6 +282,15 @@ impl UsbSession {
             return Err(UsbError::Unavailable("当前 USB 组合未启用键盘".into()));
         }
         HidKeyboardWriter::open(self.composite.hid_endpoint()?, self.udc_state_path())
+    }
+
+    pub fn serial_endpoint(&self) -> UsbResult<PathBuf> {
+        if !self.configuration.profile.serial_enabled {
+            return Err(UsbError::Unavailable(
+                "当前 USB 组合未启用 CDC ACM 串口".into(),
+            ));
+        }
+        self.composite.serial_endpoint()
     }
 
     /// 在同一个 Daemon 会话中替换完整 USB 目标配置。
@@ -257,10 +327,43 @@ impl UsbSession {
                 }
             }
         }
+        if let Err(error) = self.sync_uvc_runtime(configuration.profile.uvc.as_ref()) {
+            let rollback = self.composite.activate(
+                &previous.profile,
+                &previous.identity,
+                &self.udc,
+                self.config.udc_bind_timeout,
+            );
+            if rollback.is_ok() {
+                let _ = self.sync_uvc_runtime(previous.profile.uvc.as_ref());
+                return Err(error);
+            }
+            let stop_error = self.stop_inner().err();
+            return Err(UsbError::RestoreFailed(format!(
+                "应用新 UVC Runtime 失败：{error}；恢复 HyperUSB 也失败：{rollback:?}{}",
+                stop_error
+                    .map(|value| format!("；停止会话也失败：{value}"))
+                    .unwrap_or_default()
+            )));
+        }
 
         self.configuration = configuration;
         self.refresh_state();
         Ok(())
+    }
+
+    pub fn set_uvc_streaming(&self, enabled: bool) -> UsbResult<()> {
+        self.uvc_runtime.set_streaming(enabled)
+    }
+
+    pub fn notify_uvc_format(
+        &self,
+        format: UvcFormatKind,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> UsbResult<()> {
+        self.uvc_runtime.notify_format(format, width, height, fps)
     }
 
     fn refresh_state(&mut self) {
@@ -268,6 +371,8 @@ impl UsbSession {
             gadget: self.config.gadget_name.clone(),
             udc: self.udc.clone(),
             keyboard_enabled: self.configuration.profile.keyboard_enabled,
+            serial_enabled: self.configuration.profile.serial_enabled,
+            uvc_enabled: self.configuration.profile.uvc.is_some(),
             storage_count: self.configuration.profile.storage_luns.len(),
         };
     }
@@ -310,6 +415,7 @@ impl UsbSession {
         }
 
         let deactivate = self.composite.deactivate();
+        let stop_uvc = self.uvc_runtime.stop();
         let restore = match self.android_lease.as_mut() {
             Some(lease) => lease.restore(),
             None => Ok(()),
@@ -319,15 +425,47 @@ impl UsbSession {
 
         info!("HyperUSB session stopped");
 
-        match (deactivate, restore) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(()), Err(restore_error)) => Err(UsbError::RestoreFailed(format!(
+        match (deactivate, restore, stop_uvc) {
+            (Ok(()), Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(()), Ok(())) => Err(error),
+            (Ok(()), Ok(()), Err(uvc_error)) => {
+                Err(UsbError::Unavailable(format!("停止 UVC Runtime 失败：{uvc_error}")))
+            }
+            (Ok(()), Err(restore_error), Ok(())) => Err(UsbError::RestoreFailed(format!(
                 "恢复 Android USB 失败：{restore_error}"
             ))),
-            (Err(deactivate_error), Err(restore_error)) => Err(UsbError::RestoreFailed(format!(
-                "停用 HyperUSB 失败：{deactivate_error}；恢复 Android USB 也失败：{restore_error}"
-            ))),
+            (Ok(()), Err(restore_error), Err(uvc_error)) => {
+                Err(UsbError::RestoreFailed(format!(
+                    "恢复 Android USB 失败：{restore_error}；停止 UVC Runtime 失败：{uvc_error}"
+                )))
+            }
+            (Err(deactivate_error), Ok(()), Err(uvc_error)) => Err(
+                UsbError::RestoreFailed(format!(
+                    "停用 HyperUSB 失败：{deactivate_error}；停止 UVC Runtime 失败：{uvc_error}"
+                )),
+            ),
+            (Err(deactivate_error), Err(restore_error), Ok(())) => Err(
+                UsbError::RestoreFailed(format!(
+                    "停用 HyperUSB 失败：{deactivate_error}；恢复 Android USB 也失败：{restore_error}"
+                )),
+            ),
+            (Err(deactivate_error), Err(restore_error), Err(uvc_error)) => Err(
+                UsbError::RestoreFailed(format!(
+                    "停用 HyperUSB 失败：{deactivate_error}；恢复 Android USB 也失败：{restore_error}；停止 UVC Runtime 失败：{uvc_error}"
+                )),
+            ),
+        }
+    }
+
+    fn sync_uvc_runtime(&mut self, config: Option<&UvcConfig>) -> UsbResult<()> {
+        match (self.uvc_runtime.is_active(), config) {
+            (true, Some(config)) => self.uvc_runtime.reconfigure(config),
+            (true, None) => self.uvc_runtime.stop(),
+            (false, Some(config)) => {
+                self.uvc_runtime = UsbUvcRuntime::start(Some(config))?;
+                Ok(())
+            }
+            (false, None) => Ok(()),
         }
     }
 }

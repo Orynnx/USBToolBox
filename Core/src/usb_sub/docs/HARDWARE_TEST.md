@@ -1,5 +1,11 @@
 # HyperUSB Core 硬件测试
 
+> **UNTESTED — 本文是验收清单，不是当前版本的通过报告。**
+>
+> 当前 Core 版本尚未完成真实 Android 设备/USB Host 的 CDC ACM、UVC 画面和 Camera2 Producer
+> 验证。文末已有的历史记录只覆盖当时版本的 Boot/Storage/Daemon 项目，不能证明本版本的
+> ACM/UVC 已通过实机测试。
+
 ## 1. 前置条件
 
 - Android设备已 Root并支持 ConfigFS USB Gadget。
@@ -69,7 +75,99 @@ printf 'BOOT_KEY T\n' | su -c 'toybox nc -U -q 1 /data/adb/usb_sub/usb.sock'
 - `BOOT_KEY CTRL SHIFT ESC` 能打开 Windows任务管理器。
 - 相同配置再次 `SET` 返回 `OK`，Host不重新枚举。
 
-## 3. 普通磁盘
+## 3. CDC ACM 串口
+
+配置 `/data/adb/usb_sub/serial.json`：
+
+```json
+{
+  "device": {
+    "manufacturer": "HyperUSB",
+    "product": "HyperUSB Serial",
+    "serialNumber": "HYPERUSB-SERIAL-0001"
+  },
+  "serial": {
+    "enabled": true
+  }
+}
+```
+
+应用配置：
+
+```sh
+printf 'SET /data/adb/usb_sub/serial.json\n' | su -c 'toybox nc -U -q 1 /data/adb/usb_sub/usb.sock'
+```
+
+设备侧读取 ACM Function 的端口编号：
+
+```sh
+cat /config/usb_gadget/hyperusb/functions/acm.hyperusb/port_num
+```
+
+如果读到 `0`，设备侧端点就是 `/dev/ttyGS0`。Host 侧应枚举出 CDC ACM COM 口；打开
+COM 口时可使用任意常见的 `8N1`、`115200` 等参数，但这些是 Host 运行时参数，不是
+HyperUSB 的静态 Gadget 配置。
+
+验收：
+
+- `acm.hyperusb` 已链接到 `configs/c.1`。
+- Host 设备管理器出现 CDC ACM 串口。
+- 读取 `port_num` 得到合法的非负整数，并映射到 `/dev/ttyGS<n>`。
+- 将 `serial.enabled` 改为 `false` 后重新 `SET`，串口 Function 链接被移除，Android USB恢复。
+
+## 4. UVC 摄像头
+
+配置 `/data/adb/usb_sub/uvc.json`：
+
+```json
+{
+  "device": {
+    "manufacturer": "HyperUSB",
+    "product": "HyperUSB Camera",
+    "serialNumber": "HYPERUSB-UVC-0001"
+  },
+  "uvc": {
+    "enabled": true,
+    "formats": [
+      {
+        "format": "mjpeg",
+        "frames": [
+          {"width": 1280, "height": 720, "fps": [30, 60]},
+          {"width": 1920, "height": 1080, "fps": [30]}
+        ]
+      },
+      {
+        "format": "yuyv",
+        "frames": [
+          {"width": 640, "height": 480, "fps": [30]}
+        ]
+      }
+    ]
+  }
+}
+```
+
+应用配置：
+
+```sh
+printf 'SET /data/adb/usb_sub/uvc.json\n' | su -c 'toybox nc -U -q 1 /data/adb/usb_sub/usb.sock'
+```
+
+验收：
+
+- `uvc.hyperusb` 已链接到 `configs/c.1`。
+- Host 识别出 USB Camera/UVC 摄像头。
+- Host 能枚举 MJPEG 的 1280x720@30/60、1920x1080@30，以及 YUYV 640x480@30。
+- `hyperusbd` 启动时能找到 `g_uvc` 的 `/dev/videoX` output 节点，并创建：
+  `/data/adb/usb_sub/uvc.sock`。
+- Producer 连接 `uvc.sock` 后先发送 `HELLO`，收到 Core 的 `FORMAT` 和 `STREAM_ON` 后，
+  发送完整 MJPEG/YUYV `FRAME`；Host Camera 应能显示动态画面。
+- Host 切换分辨率/FPS 时，Producer 应收到新的 `FORMAT`；Host 关闭摄像头时应收到
+  `STREAM_OFF`。Producer 崩溃后 USB 不应重新枚举，重新连接应恢复当前状态。
+- 本配置不指定摄像头来源，来源仍由 Producer 决定。
+- 将 `uvc.enabled` 改为 `false` 后重新 `SET`，UVC Function 链接被移除，Android USB恢复。
+
+## 5. 普通磁盘
 
 创建测试镜像：
 
@@ -114,7 +212,7 @@ fsutil volume dismount E:
 
 5. `SET empty.json`恢复 Android USB后重新 `SET`同一镜像，确认文件内容和 SHA-256不变。
 
-## 4. CD-ROM
+## 6. CD-ROM
 
 配置中设置 `cdrom=true` 并省略 `readOnly`，`SET` 应返回 `OK`，Windows应枚举只读光驱。
 
@@ -134,7 +232,7 @@ ERR invalid_config
 
 当前活动 USB不能断开或重新枚举。
 
-## 5. 校验失败、恢复与安全退出
+## 7. 校验失败、恢复与安全退出
 
 - 对活动会话发送不存在、超大或非法 JSON配置，确认返回稳定错误码且 Host设备保持不变。
 - 在活动状态向 Daemon发送 `SIGTERM`，确认先恢复 Android USB，再删除 `usb.sock`。
@@ -146,7 +244,7 @@ ERR invalid_config
 - `hyperusbd restore`在没有 recovery state时输出 `OK`并以成功状态退出。
 - canonical和 legacy state同时存在时使用 canonical、记录 warning，并在成功后尽力删除 legacy。
 
-## 6. 空配置与宽容协议
+## 8. 空配置与宽容协议
 
 准备内容为 `{}` 的 `/data/adb/usb_sub/empty.json`，执行 `SET`：
 
@@ -159,7 +257,7 @@ ERR invalid_config
 - `boot_key ctrl LCTRL shift a`可以执行，重复 modifier自动去重。
 - `BOOT_KEY NONE A`、缺少普通键、多个普通键和未知键仍返回 `ERR invalid_command`。
 
-## 7. Daemon协议实测记录
+## 9. Daemon协议实测记录
 
 2026-08-20，Android 17 / SDK 37 Root设备与 Windows Host完成本版 Daemon复测：
 

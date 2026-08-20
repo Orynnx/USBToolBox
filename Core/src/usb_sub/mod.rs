@@ -15,7 +15,16 @@ pub mod usb_hid;
 pub mod usb_model;
 pub mod usb_protocol;
 pub mod usb_recovery;
+pub mod usb_serial;
 pub mod usb_storage;
+#[cfg(unix)]
+pub mod usb_uvc;
+#[cfg(not(unix))]
+pub mod usb_uvc_stub;
+#[cfg(unix)]
+pub mod uvc_runtime;
+#[cfg(not(unix))]
+pub mod uvc_runtime_stub;
 
 use std::fmt;
 
@@ -33,12 +42,27 @@ pub use usb_hid::{
 };
 #[allow(unused_imports)]
 pub use usb_model::{
-    UsbConfiguration, UsbProfile, UsbRuntimeConfig, UsbRuntimeState, UsbTargetState,
+    UsbConfiguration, UsbProfile, UsbRuntimeConfig, UsbRuntimeState, UsbTargetState, UvcConfig,
+    UvcFormat, UvcFormatKind, UvcFrame,
 };
 #[allow(unused_imports)]
 pub use usb_recovery::{UsbRecoveryState, DEFAULT_USB_STATE_PATH, LEGACY_USB_STATE_PATH};
 #[allow(unused_imports)]
+pub use usb_serial::UsbSerial;
+#[allow(unused_imports)]
 pub use usb_storage::{StorageLun, UsbStorage};
+#[cfg(unix)]
+#[allow(unused_imports)]
+pub use usb_uvc::UsbUvc;
+#[cfg(not(unix))]
+#[allow(unused_imports)]
+pub use usb_uvc_stub::UsbUvc;
+#[cfg(unix)]
+#[allow(unused_imports)]
+pub use uvc_runtime::UsbUvcRuntime;
+#[cfg(not(unix))]
+#[allow(unused_imports)]
+pub use uvc_runtime_stub::UsbUvcRuntime;
 
 /// USB 核心的统一错误类型。
 #[derive(Debug)]

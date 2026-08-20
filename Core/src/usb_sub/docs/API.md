@@ -130,6 +130,26 @@ ERR restore_failed
 
   "keyboard": {
     "boot": true
+  },
+
+  "serial": {
+    "enabled": true
+  },
+
+  "uvc": {
+    "enabled": true,
+    "formats": [
+      {
+        "format": "mjpeg",
+        "frames": [
+          {
+            "width": 1280,
+            "height": 720,
+            "fps": [30, 60]
+          }
+        ]
+      }
+    ]
   }
 }
 ```
@@ -146,7 +166,7 @@ ERR invalid_config
 
 最终没有启用实际 Function时，不要求 `device`或 `serialNumber`，也不校验 VID/PID和其他 identity字段。
 
-启用 Boot Keyboard或 Disk时，`device`必须存在，`serialNumber`必须由调用方提供且非空。
+启用 Boot Keyboard、Serial、UVC 或 Disk时，`device`必须存在，`serialNumber`必须由调用方提供且非空。
 
 所有显式提供的 USB 字符串不能包含 NUL、CR或 LF，最长 126个 UTF-16 code unit。
 
@@ -254,7 +274,151 @@ KEY_UP
 
 ---
 
-## 7. BOOT_KEY
+## 7. serial
+
+```json
+{
+  "serial": {
+    "enabled": true
+  }
+}
+```
+
+启用后，Core 创建并链接 ConfigFS Function：
+
+```text
+functions/acm.hyperusb
+```
+
+Linux Gadget 会在 Function 创建后分配只读的 `port_num`。读取该值 `n` 后，设备侧端点为：
+
+```text
+/dev/ttyGS<n>
+```
+
+第一版不暴露 `baudRate`、`dataBits`、`parity`、`stopBits` 或 `protocol` 配置。Host 仍可
+发送 CDC ACM 的 `SET_LINE_CODING`、`SET_CONTROL_LINE_STATE` 和 `BREAK` 请求；这些参数
+属于 Host 运行时状态，不改变 USB Bulk 传输本身的速率。
+
+## 8. UVC Runtime 契约（v1）
+
+独立于 `usb.sock` 的运行时数据通道（仅 Producer 与 Core 通讯）：
+
+```text
+/data/adb/usb_sub/uvc.sock
+```
+
+固定头：
+
+```c
+struct UvcMessageHeader {
+    char     magic[4];    // "HUVC"
+    uint16_t version;     // 1
+    uint16_t type;
+    uint32_t payloadSize;
+};
+```
+
+消息类型：
+
+- `HELLO`：Producer 首次连接后发送。
+- `FORMAT`：Core → Producer，通知 `format / width / height / fps`。
+- `STREAM_ON` / `STREAM_OFF`：Core → Producer。
+- `FRAME`：Producer → Core，携带完整一帧。
+
+`FORMAT` 载荷：
+
+```c
+struct UvcFormat {
+    uint32_t fourcc;   // "MJPG" / "YUYV"
+    uint32_t width;
+    uint32_t height;
+    uint32_t fps;
+};
+```
+
+`FRAME` 载荷：
+
+```c
+struct UvcFrameHeader {
+    uint64_t sequence;
+    uint64_t timestampNs;
+    uint32_t dataSize;
+    uint32_t flags;
+};
+```
+
+核心规则：
+
+- 同一时刻只允许一个 Producer 连接；
+- Producer 需要先 HELLO，Core 才接受 FRAME；
+- 只缓存完整帧，默认最多 2 帧，满时丢弃最旧；
+- Producer 不需要使用 `/dev/videoX`、V4L2 ioctl、Probe/Commit 或 UVC payload 细节；这些由 Core
+  内部 V4L2 backend 处理；
+- `YUYV` 载荷必须正好是 `width*height*2` 字节，`MJPEG` 载荷必须非空。
+
+`uvc` JSON 只声明能力，Frame source 由 Producer 决定（摄像头、屏幕、文件、图片等都可实现为 Producer）。
+
+Core 内部数据面：
+
+```text
+Host Probe/Commit
+        │
+        ▼
+UVC V4L2 event backend
+        │ FORMAT / STREAM_ON/OFF
+        ▼
+uvc.sock Producer
+        │ FRAME
+        ▼
+2-frame queue → MMAP V4L2 output → UVC Gadget → Host
+```
+
+Linux/Android 上，UVC Function 绑定后 Core 会定位 `g_uvc` 的 V4L2 output 节点，订阅
+`UVC_EVENT_SETUP`、`UVC_EVENT_DATA`、`UVC_EVENT_STREAMON` 和 `UVC_EVENT_STREAMOFF`。
+Host 的 Probe/Commit 会归一化到 JSON 中声明的 format/frame/fps，并通过 `FORMAT` 通知
+Producer；`STREAM_ON` 后 Core 才接受并提交 `FRAME`。UVC Function 或 V4L2 output 节点
+启动失败会作为 UVC Runtime 启动失败返回，不会报告一个实际不可用的 UVC 会话。
+
+## 9. uvc
+
+```json
+{
+  "uvc": {
+    "enabled": true,
+    "formats": [
+      {
+        "format": "mjpeg",
+        "frames": [
+          {"width": 1280, "height": 720, "fps": [30, 60]},
+          {"width": 1920, "height": 1080, "fps": [30]}
+        ]
+      },
+      {
+        "format": "yuyv",
+        "frames": [
+          {"width": 640, "height": 480, "fps": [30]}
+        ]
+      }
+    ]
+  }
+}
+```
+
+`enabled=false` 时不创建 UVC Function，`formats` 不参与语义校验。`enabled=true` 时：
+
+- `formats` 至少一个；每个格式至少一个 `frame`。
+- `format` 大小写和首尾空白会归一化；第一版只支持 `mjpeg` 和 `yuyv`。
+- `width`、`height` 和每个 `fps` 必须大于零；重复的格式、分辨率和 FPS 会合并去重。
+- UVC Function 为 `uvc.hyperusb`，视频能力写入 ConfigFS 的 MJPEG/YUYV descriptors，并
+  链接到 `fs/hs/ss` 中可用的 streaming class。
+- `streaming_interval`、`streaming_maxpacket`、`streaming_maxburst`、
+  `maxPayloadTransferSize`、`frameBufferSize`、`/dev/videoX` 和视频来源不属于配置契约。
+
+Core 负责声明 UVC 能力、响应 Host 协商并把 Producer 帧写入 Gadget 的 V4L2 output；视频
+来源仍由 Producer 决定，不由本配置决定。
+
+## 10. BOOT_KEY
 
 `BOOT_KEY` 执行一次完整的按键组合：
 
@@ -353,7 +517,7 @@ ERR internal_error
 
 ---
 
-## 8. 空配置与 Daemon退出
+## 11. 空配置与 Daemon退出
 
 没有单独的 `STOP` 命令。
 
@@ -398,7 +562,7 @@ SET
 
 ---
 
-## 9. 错误码
+## 12. 错误码
 
 ```text
 invalid_command
@@ -425,7 +589,7 @@ internal_error
 HyperUSBCore
 ```
 
-## 10. 上层调用模型
+## 13. 上层调用模型
 
 最终 API 可以概括为：
 
