@@ -59,6 +59,12 @@ class _NoAnimationPageTransitionsBuilder extends PageTransitionsBuilder {
   const _NoAnimationPageTransitionsBuilder();
 
   @override
+  Duration get transitionDuration => Duration.zero;
+
+  @override
+  Duration get reverseTransitionDuration => Duration.zero;
+
+  @override
   Widget buildTransitions<T>(
     PageRoute<T> route,
     BuildContext context,
@@ -70,33 +76,16 @@ class _NoAnimationPageTransitionsBuilder extends PageTransitionsBuilder {
   }
 }
 
-/// 全局统一页面路由（支持预测性返回背景遮罩、松手平滑淡出及无动画即时响应）
+/// 全局统一页面路由。
+/// 页面动效由 [PageTransitionsTheme] 统一管理，避免在 Route 层重复覆盖
+/// barrier、snapshot 和 transition duration。
 class AppPageRoute<T> extends MaterialPageRoute<T> {
   AppPageRoute({
     required super.builder,
     super.settings,
     super.maintainState = true,
     super.fullscreenDialog = false,
-    super.allowSnapshotting = false,
   });
-
-  @override
-  Color? get barrierColor => appThemeManager.disableAnimations
-      ? null
-      : Colors.black.withValues(alpha: 0.32);
-
-  @override
-  bool get barrierDismissible => false;
-
-  @override
-  Duration get transitionDuration => appThemeManager.disableAnimations
-      ? Duration.zero
-      : const Duration(milliseconds: 300);
-
-  @override
-  Duration get reverseTransitionDuration => appThemeManager.disableAnimations
-      ? Duration.zero
-      : const Duration(milliseconds: 300);
 }
 
 /// 全局主题管理器（支持持久化到 config.toml）
@@ -235,9 +224,6 @@ class AppThemeManager extends ChangeNotifier {
   void setDisableAnimations(bool value) {
     if (_disableAnimations != value) {
       _disableAnimations = value;
-      if (value) {
-        _enablePredictiveBack = false;
-      }
       notifyListeners();
       _saveToConfig();
     }
@@ -269,7 +255,7 @@ class AppThemeManager extends ChangeNotifier {
       builders: {
         TargetPlatform.android: _enablePredictiveBack
             ? const PredictiveBackPageTransitionsBuilder()
-            : const ZoomPageTransitionsBuilder(),
+            : const FadeForwardsPageTransitionsBuilder(),
         TargetPlatform.windows: const ZoomPageTransitionsBuilder(),
         TargetPlatform.linux: const ZoomPageTransitionsBuilder(),
         TargetPlatform.macOS: const ZoomPageTransitionsBuilder(),
@@ -277,6 +263,13 @@ class AppThemeManager extends ChangeNotifier {
       },
     );
   }
+
+  /// Android Material 3 默认 InkSparkle 的动画长于普通页面前进转场，
+  /// 当旧 Route 被新的 opaque Route 覆盖时，未结束的 ticker 会暂停并在返回时继续。
+  /// 正常模式改用官方 InkRipple，使点击反馈在前进转场结束前完成；
+  /// “移除所有动画”模式则不创建 splash 动画。
+  InteractiveInkFeatureFactory get _splashFactory =>
+      _disableAnimations ? NoSplash.splashFactory : InkRipple.splashFactory;
 
   /// 构建浅色主题
   ThemeData getLightTheme([ColorScheme? dynamicLight]) {
@@ -296,6 +289,7 @@ class AppThemeManager extends ChangeNotifier {
       colorScheme: colorScheme,
       scaffoldBackgroundColor: colorScheme.surface,
       pageTransitionsTheme: _pageTransitionsTheme,
+      splashFactory: _splashFactory,
       appBarTheme: AppBarTheme(
         centerTitle: false,
         backgroundColor: colorScheme.surface,
@@ -333,6 +327,7 @@ class AppThemeManager extends ChangeNotifier {
       colorScheme: colorScheme,
       scaffoldBackgroundColor: colorScheme.surface,
       pageTransitionsTheme: _pageTransitionsTheme,
+      splashFactory: _splashFactory,
       appBarTheme: AppBarTheme(
         centerTitle: false,
         backgroundColor: colorScheme.surface,
