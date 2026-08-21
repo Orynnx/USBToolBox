@@ -1,30 +1,27 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
 import 'package:hyperusb_ui/main.dart';
+import 'package:hyperusb_ui/subDevice/mainScreen.dart';
+import 'package:hyperusb_ui/subDevice/devicePage.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('USB Device Controller shows every device entry point', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const HyperUsbApp());
+    expect(find.byType(MainScreen), findsOneWidget);
+    expect(find.text('虚拟磁盘'), findsOneWidget);
+    expect(find.text('虚拟 HID'), findsOneWidget);
+    expect(find.text('虚拟摄像头'), findsOneWidget);
+    expect(find.text('虚拟串口'), findsOneWidget);
+    expect(find.text('虚拟网卡'), findsOneWidget);
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  testWidgets('device pages use the shared Material scaffold', (tester) async {
+    await tester.pumpWidget(const HyperUsbApp());
+    await tester.tap(find.text('虚拟磁盘'));
+    await tester.pumpAndSettle();
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    expect(find.byType(DeviceScaffold), findsOneWidget);
+    expect(find.text('磁盘模式'), findsOneWidget);
   });
 }

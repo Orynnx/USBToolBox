@@ -1,4 +1,4 @@
-package com.example.hyperusb_ui
+package org.orynnx.hyperusb
 
 import io.flutter.embedding.android.FlutterActivity
 
