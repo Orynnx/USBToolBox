@@ -11,6 +11,10 @@ pub fn run() -> Result<(), String> {
         [] => usb_daemon::run(),
         [command] if command == "daemon" => usb_daemon::run(),
         [command] if command == "info" || command == "--info" => info::print(),
+        [command] if command == "--version" || command == "version" => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         [command] if command == "restore" => {
             usb_daemon::restore()?;
             println!("OK");
@@ -33,6 +37,7 @@ fn print_usage() {
          用法:\n\
            hyperusbd [daemon]             启动常驻 USB Daemon（默认）\n\
            hyperusbd info | --info        查看设备与 Core 信息\n\
+           hyperusbd version | --version  查看 Core 版本\n\
            hyperusbd restore              恢复异常退出前的 Android USB\n\
            hyperusbd help                 查看帮助"
     );

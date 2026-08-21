@@ -38,6 +38,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   dynamic_color: ^1.7.0
   path_provider: ^2.1.6
+  shared_preferences: ^2.5.3
   toml: ^0.18.0
 
 dev_dependencies:
@@ -56,6 +57,9 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+
+  assets:
+    - assets/core/arm64-v8a/hyperusbd
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in

@@ -2,227 +2,350 @@
 
 import 'package:flutter/material.dart';
 import '../../l10n/app_localizations.dart';
+import '../../core/core_client.dart';
+import '../../core/core_deployment_service.dart';
+import '../../core/root_shell_service.dart';
+import '../../storage/models/virtual_disk.dart';
+import '../../storage/services/disk_storage_service.dart';
+import '../../storage/services/document_picker_service.dart';
+import '../../usb/usb_session_service.dart';
+import '../../theme/app_theme.dart';
 import '../devicePage.dart';
 import 'components.dart';
 
-/// 虚拟磁盘与存储设备（USB 大容量存储 Mass Storage）配置页面
+/// User-owned backing files only; never scans /sdcard for disks.
 class DiskScreen extends StatefulWidget {
   const DiskScreen({super.key});
-
   @override
   State<DiskScreen> createState() => _DiskScreenState();
 }
 
 class _DiskScreenState extends State<DiskScreen> {
-  // 模拟磁盘设备列表
-  final List<DiskDeviceItem> _disks = [
-    DiskDeviceItem(
-      id: 'disk_1',
-      name: 'Ventoy MultiBoot',
-      path: '/sdcard/images/ventoy.img',
-      size: '64.0 GB',
-      fileSystem: 'exFAT',
-      type: DiskDeviceType.usb,
-      state: DiskDeviceState.running,
-      accessMode: DiskAccessMode.readWrite,
-      enableFua: true,
-      removableMedia: true,
-    ),
-    DiskDeviceItem(
-      id: 'disk_2',
-      name: 'Windows 11 Setup ISO',
-      path: '/sdcard/images/Win11_24H2.iso',
-      size: '5.8 GB',
-      fileSystem: 'ISO',
-      type: DiskDeviceType.cdrom,
-      state: DiskDeviceState.stopped,
-      accessMode: DiskAccessMode.readOnly,
-      enableFua: false,
-      removableMedia: true,
-    ),
-    DiskDeviceItem(
-      id: 'disk_3',
-      name: 'Arch Linux Install Disk',
-      path: '/sdcard/images/archlinux-x86_64.img',
-      size: '1.2 GB',
-      fileSystem: 'FAT32',
-      type: DiskDeviceType.usb,
-      state: DiskDeviceState.stopped,
-      accessMode: DiskAccessMode.readOnly,
-      enableFua: false,
-      removableMedia: true,
-    ),
-    DiskDeviceItem(
-      id: 'disk_error_demo',
-      name: '损坏的系统镜像',
-      path: '/sdcard/images/broken_backup.img',
-      size: '4.0 GB',
-      fileSystem: 'RAW',
-      type: DiskDeviceType.usb,
-      state: DiskDeviceState.stopped,
-      accessMode: DiskAccessMode.readOnly,
-      enableFua: false,
-      removableMedia: true,
-    ),
-  ];
+  final _storage = DiskStorageService();
+  final _root = RootShellService();
+  late final _client = CoreClient(_root);
+  late final _session = UsbSessionService(
+    _root,
+    CoreDeploymentService(_root, _client),
+    _client,
+  );
+  List<VirtualDisk> _disks = [];
+  final Set<String> _operating = {};
+  final Set<String> _removing = {};
 
-  int get _mountedCount =>
-      _disks.where((d) => d.state == DiskDeviceState.running).length;
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
 
-  Future<void> _toggleDiskState(DiskDeviceItem disk) async {
-    final originalState = disk.state;
-    // 切换为操作中 Loading 状态
+  Future<void> _load() async {
+    final value = await _storage.load();
+    if (mounted) setState(() => _disks = value);
+  }
+
+  Future<void> _save() => _storage.save(_disks);
+  String _errorText(String key, Object error) =>
+      context.l10n.text(key).replaceAll('%s', '$error');
+  int get _mounted => _disks.where((disk) => disk.desiredEnabled).length;
+
+  DiskDeviceItem _item(VirtualDisk disk) => DiskDeviceItem(
+    id: disk.id,
+    name: disk.name,
+    path: disk.imagePath,
+    size: '${(disk.sizeBytes / (1024 * 1024)).toStringAsFixed(1)} MB',
+    fileSystem: disk.type == VirtualDiskType.cdrom ? 'ISO' : 'IMG',
+    type: disk.type == VirtualDiskType.cdrom
+        ? DiskDeviceType.cdrom
+        : DiskDeviceType.usb,
+    state: _operating.contains(disk.id)
+        ? DiskDeviceState.operating
+        : disk.desiredEnabled
+        ? DiskDeviceState.running
+        : DiskDeviceState.stopped,
+    accessMode: disk.readOnly
+        ? DiskAccessMode.readOnly
+        : DiskAccessMode.readWrite,
+    enableFua: disk.enableFua,
+    removableMedia: disk.removable,
+    documentUri: disk.documentUri,
+  );
+
+  Future<void> _toggle(VirtualDisk disk) async {
+    final previous = List<VirtualDisk>.from(_disks);
+    setState(() => _operating.add(disk.id));
+    try {
+      if (!disk.desiredEnabled && !disk.managedFile) {
+        await _storage.verifyRegularFile(disk.imagePath);
+      }
+      _disks = _disks
+          .map(
+            (item) => item.id == disk.id
+                ? item.copyWith(desiredEnabled: !item.desiredEnabled)
+                : item,
+          )
+          .toList();
+      final status = await _session.apply(_disks);
+      _disks = _disks
+          .map(
+            (item) => item.copyWith(
+              desiredEnabled: status.storageLuns.contains(item.imagePath),
+            ),
+          )
+          .toList();
+      await _save();
+    } catch (error) {
+      _disks = previous;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_errorText('usbOperationFailed', error))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _operating.remove(disk.id));
+    }
+  }
+
+  Future<void> _stopAll() async {
+    final previous = List<VirtualDisk>.from(_disks);
     setState(() {
-      disk.state = DiskDeviceState.operating;
+      _operating.addAll(_disks.map((disk) => disk.id));
+      _disks = _disks
+          .map((disk) => disk.copyWith(desiredEnabled: false))
+          .toList();
     });
+    try {
+      await _session.apply(_disks);
+      await _save();
+    } catch (error) {
+      _disks = previous;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_errorText('usbOperationFailed', error))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _operating.clear());
+    }
+  }
 
-    // 模拟底层异步挂载/卸载驱动耗时
-    await Future.delayed(const Duration(milliseconds: 650));
-    if (!mounted) return;
+  Future<void> _saveItem(
+    DiskDeviceItem item, {
+    bool managed = false,
+    int? knownSize,
+    String? documentUri,
+  }) async {
+    final size = knownSize ?? await _storage.verifyRegularFile(item.path);
+    final disk = VirtualDisk(
+      id: item.id,
+      name: item.name,
+      imagePath: item.path,
+      type: item.type == DiskDeviceType.cdrom
+          ? VirtualDiskType.cdrom
+          : VirtualDiskType.disk,
+      readOnly: item.accessMode == DiskAccessMode.readOnly,
+      removable: item.removableMedia,
+      enableFua: item.enableFua,
+      desiredEnabled: false,
+      managedFile: managed,
+      sizeBytes: size,
+      documentUri: documentUri ?? item.documentUri,
+    );
+    setState(() {
+      final index = _disks.indexWhere((value) => value.id == disk.id);
+      if (index < 0) {
+        _disks.add(disk);
+      } else {
+        _disks[index] = disk;
+      }
+    });
+    await _save();
+  }
 
-    // 模拟镜像损坏或路径异常错误处理逻辑
-    if (disk.id == 'disk_error_demo' ||
-        disk.path.contains('broken') ||
-        disk.path.contains('corrupted')) {
-      setState(() {
-        disk.state = DiskDeviceState.stopped;
-      });
+  void _import() => DiskEditBottomSheet.showImport(
+    context,
+    item: DiskDeviceItem(
+      id: 'disk_${DateTime.now().millisecondsSinceEpoch}',
+      name: '',
+      path: '',
+      size: '0 MB',
+      fileSystem: 'IMG',
+    ),
+    onSave: (item) async {
+      try {
+        if (item.sourceUri == null || item.treeUri == null) {
+          await _saveItem(item);
+          return;
+        }
+        final separator = item.path.lastIndexOf('/');
+        if (separator <= 0) {
+          throw ArgumentError(context.l10n.text('invalidImportDestination'));
+        }
+        final destination = DirectorySelection(
+          item.treeUri!,
+          item.path.substring(0, separator),
+        );
+        final source = DocumentSelection(
+          item.sourceUri!,
+          item.path.substring(separator + 1),
+          item.sourceSize ?? 0,
+        );
+        final copied = await DocumentPickerService.copyDocument(
+          source,
+          destination,
+        );
+        await _saveItem(
+          item.copyWith(path: copied.path),
+          managed: true,
+          knownSize: copied.size,
+          documentUri: copied.uri,
+        );
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(_errorText('importFailed', e))),
+          );
+        }
+      }
+    },
+  );
 
-      final DiskErrorReason reason = disk.path.contains('broken')
-          ? DiskErrorReason.corruptedImage
-          : disk.path.contains('notfound')
-              ? DiskErrorReason.fileNotFound
-              : DiskErrorReason.internalError;
-
-      DiskErrorBottomSheet.show(
-        context,
-        item: disk,
-        reason: reason,
-        onEdit: () => _openEditSheet(disk),
-        onDelete: () => _deleteDisk(disk),
+  void _create() => DiskCreateBottomSheet.show(
+    context,
+    onCreate: (item) async {
+      try {
+        final value =
+            double.tryParse(
+              RegExp(r'[0-9.]+').firstMatch(item.size)?.group(0) ?? '',
+            ) ??
+            0;
+        final bytes =
+            (value *
+                    (item.size.contains('GB')
+                        ? 1024 * 1024 * 1024
+                        : 1024 * 1024))
+                .round();
+        final safe = item.name.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+        if (item.treeUri == null ||
+            !(item.path == '/storage/emulated/0' ||
+                item.path.startsWith('/storage/emulated/0/'))) {
+          throw ArgumentError(
+            context.l10n.text('selectInternalStorageDirectory'),
+          );
+        }
+        final separator = item.path.lastIndexOf('/');
+        final directory = separator > 0
+            ? item.path.substring(0, separator)
+            : item.path;
+        final created = await DocumentPickerService.createSparse(
+          DirectorySelection(item.treeUri!, directory),
+          '${safe.isEmpty ? item.id : safe}.img',
+          bytes,
+        );
+        await _saveItem(
+          item.copyWith(path: created.path),
+          managed: true,
+          knownSize: created.size,
+          documentUri: created.uri,
+        );
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(_errorText('createFailed', error))),
+          );
+        }
+      }
+    },
+  );
+  void _edit(VirtualDisk disk) {
+    if (disk.desiredEnabled) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Stop this disk before editing it.')),
       );
       return;
     }
-
-    setState(() {
-      disk.state = originalState == DiskDeviceState.running
-          ? DiskDeviceState.stopped
-          : DiskDeviceState.running;
-    });
-  }
-
-  Future<void> _stopAllMountedDisks() async {
-    final mountedDisks =
-        _disks.where((d) => d.state == DiskDeviceState.running).toList();
-    if (mountedDisks.isEmpty) return;
-
-    setState(() {
-      for (final d in mountedDisks) {
-        d.state = DiskDeviceState.operating;
-      }
-    });
-
-    await Future.delayed(const Duration(milliseconds: 750));
-    if (!mounted) return;
-
-    setState(() {
-      for (final d in mountedDisks) {
-        d.state = DiskDeviceState.stopped;
-      }
-    });
-  }
-
-  void _openEditSheet(DiskDeviceItem disk) {
     DiskEditBottomSheet.show(
       context,
-      item: disk,
-      onSave: (updated) {
-        setState(() {
-          final index = _disks.indexWhere((d) => d.id == updated.id);
-          if (index != -1) {
-            _disks[index] = updated;
-          }
-        });
-      },
+      item: _item(disk),
+      onSave: (item) => _saveItem(item, managed: disk.managedFile),
     );
   }
 
-  void _deleteDisk(DiskDeviceItem disk) {
-    setState(() {
-      _disks.removeWhere((d) => d.id == disk.id);
-    });
-  }
-
-  void _openAddNewSheet() {
-    final newItem = DiskDeviceItem(
-      id: 'disk_${DateTime.now().millisecondsSinceEpoch}',
-      name: '',
-      path: '/sdcard/images/new_drive.img',
-      size: '16.0 GB',
-      fileSystem: 'FAT32',
-      type: DiskDeviceType.usb,
-      state: DiskDeviceState.stopped,
-      accessMode: DiskAccessMode.readWrite,
-      enableFua: false,
-      removableMedia: true,
-    );
-
-    DiskEditBottomSheet.show(
+  Future<void> _delete(VirtualDisk disk) async {
+    final missingFilePermission = context.l10n.text('missingFilePermission');
+    final decision = await DiskDeleteBottomSheet.show(
       context,
-      item: newItem,
-      onSave: (created) {
-        setState(() {
-          _disks.add(created);
-        });
-      },
+      diskName: disk.name,
+      canDeleteImageFile: disk.documentUri != null,
     );
-  }
-
-  void _openCreateSheet() {
-    DiskCreateBottomSheet.show(
-      context,
-      onCreate: (created) {
-        setState(() {
-          _disks.add(created);
-        });
-      },
-    );
+    if (decision == null || !mounted) return;
+    try {
+      if (disk.desiredEnabled) await _toggle(disk);
+      if (_disks.any((item) => item.id == disk.id && item.desiredEnabled)) {
+        return;
+      }
+      if (decision.deleteImageFile) {
+        final uri = disk.documentUri;
+        if (uri == null) {
+          throw StateError(missingFilePermission);
+        }
+        await DocumentPickerService.deleteDocument(uri);
+      }
+      if (!mounted) return;
+      setState(() => _removing.add(disk.id));
+      if (!appThemeManager.disableAnimations) {
+        await Future<void>.delayed(const Duration(milliseconds: 260));
+      }
+      if (!mounted) return;
+      setState(() {
+        _disks.removeWhere((item) => item.id == disk.id);
+        _removing.remove(disk.id);
+      });
+      await _save();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _removing.remove(disk.id));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_errorText('deleteFailed', error))),
+        );
+      }
+    }
   }
 
   @override
-  Widget build(BuildContext context) {
-    final l10n = context.l10n;
-
-    return DeviceScaffold(
-      title: l10n.text('virtualDisks'),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // 1. 顶部系统级功能状态栏（Section Status Header）
-          DiskStatusHeader(
-            mountedCount: _mountedCount,
-            onMasterAction: _stopAllMountedDisks,
+  Widget build(BuildContext context) => DeviceScaffold(
+    title: context.l10n.text('virtualDisks'),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        DiskStatusHeader(mountedCount: _mounted, onMasterAction: _stopAll),
+        const SizedBox(height: 14),
+        ..._disks.map(
+          (disk) => AnimatedSize(
+            key: ValueKey(disk.id),
+            duration: appThemeManager.disableAnimations
+                ? Duration.zero
+                : const Duration(milliseconds: 260),
+            curve: Curves.easeInOutCubic,
+            child: AnimatedSwitcher(
+              duration: appThemeManager.disableAnimations
+                  ? Duration.zero
+                  : const Duration(milliseconds: 220),
+              child: _removing.contains(disk.id)
+                  ? const SizedBox.shrink(key: ValueKey('removed'))
+                  : DiskDeviceCard(
+                      key: const ValueKey('card'),
+                      item: _item(disk),
+                      onEdit: () => _edit(disk),
+                      onToggleState: () => _toggle(disk),
+                      onDelete: () => _delete(disk),
+                    ),
+            ),
           ),
-          const SizedBox(height: 14),
-
-          // 2. 磁盘设备列表
-          ..._disks.map((disk) => DiskDeviceCard(
-                key: ValueKey(disk.id),
-                item: disk,
-                onEdit: () => _openEditSheet(disk),
-                onToggleState: () => _toggleDiskState(disk),
-                onDelete: () => _deleteDisk(disk),
-              )),
-
-          const SizedBox(height: 10),
-
-          // 3. 导入镜像 / 新建镜像 操作按钮（一行各占一半宽度）
-          DiskActionButtons(
-            onImport: _openAddNewSheet,
-            onCreate: _openCreateSheet,
-          ),
-        ],
-      ),
-    );
-  }
+        ),
+        const SizedBox(height: 10),
+        DiskActionButtons(onImport: _import, onCreate: _create),
+      ],
+    ),
+  );
 }

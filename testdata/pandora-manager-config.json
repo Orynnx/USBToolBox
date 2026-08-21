@@ -1,0 +1,25 @@
+{
+  "device": {
+    "manufacturer": "HyperUSB",
+    "product": "HyperUSB Composite",
+    "serialNumber": "HU-PANDORA-TEST"
+  },
+  "storage": {
+    "luns": [
+      {
+        "imagePath": "/data/media/0/HyperUSB/images/disk-a.img",
+        "readOnly": false,
+        "removable": true,
+        "cdrom": false,
+        "noFua": false
+      },
+      {
+        "imagePath": "/data/media/0/HyperUSB/images/disk-b.img",
+        "readOnly": true,
+        "removable": true,
+        "cdrom": false,
+        "noFua": true
+      }
+    ]
+  }
+}

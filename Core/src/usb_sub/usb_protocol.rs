@@ -18,6 +18,7 @@ pub enum ApiErrorCode {
     InvalidDeviceVersion,
     ImageNotFound,
     ImageNotFile,
+    DuplicateBackingFile,
     NotStarted,
     BootDisabled,
     ApplyFailed,
@@ -37,6 +38,7 @@ impl ApiErrorCode {
             Self::InvalidDeviceVersion => "invalid_device_version",
             Self::ImageNotFound => "image_not_found",
             Self::ImageNotFile => "image_not_file",
+            Self::DuplicateBackingFile => "duplicate_backing_file",
             Self::NotStarted => "not_started",
             Self::BootDisabled => "boot_disabled",
             Self::ApplyFailed => "apply_failed",
@@ -74,12 +76,15 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiRequest {
     Set(PathBuf),
+    Ping,
+    Status,
     BootKey(KeyChord),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiResponse {
     Ok,
+    Status(String),
     Error(ApiErrorCode),
 }
 
@@ -87,6 +92,7 @@ impl ApiResponse {
     pub fn encode(self) -> String {
         match self {
             Self::Ok => "OK\n".into(),
+            Self::Status(payload) => format!("OK {payload}\n"),
             Self::Error(code) => format!("ERR {}\n", code.as_str()),
         }
     }
@@ -112,6 +118,12 @@ pub fn parse_request(line: &str) -> ApiResult<ApiRequest> {
         }
         return Ok(ApiRequest::Set(PathBuf::from(path)));
     }
+    if command.eq_ignore_ascii_case("PING") && arguments.is_empty() {
+        return Ok(ApiRequest::Ping);
+    }
+    if command.eq_ignore_ascii_case("STATUS") && arguments.is_empty() {
+        return Ok(ApiRequest::Status);
+    }
     if command.eq_ignore_ascii_case("BOOT_KEY") {
         return parse_boot_key(arguments).map(ApiRequest::BootKey);
     }
@@ -120,6 +132,12 @@ pub fn parse_request(line: &str) -> ApiResult<ApiRequest> {
 
 fn parse_boot_key(arguments: &str) -> ApiResult<KeyChord> {
     let tokens = arguments.split_ascii_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return Err(ApiError::new(
+            ApiErrorCode::InvalidCommand,
+            "BOOT_KEY 不能为空",
+        ));
+    }
     let mut modifiers = Modifiers::NONE;
     let mut key = None;
     for name in tokens {
@@ -129,7 +147,7 @@ fn parse_boot_key(arguments: &str) -> ApiResult<KeyChord> {
             if key.replace(normal_key).is_some() {
                 return Err(ApiError::new(
                     ApiErrorCode::InvalidCommand,
-                    "BOOT_KEY 只能包含一个普通按键",
+                    "BOOT_KEY 只能包含最多一个普通按键",
                 ));
             }
         } else {
@@ -139,9 +157,14 @@ fn parse_boot_key(arguments: &str) -> ApiResult<KeyChord> {
             ));
         }
     }
-    let key =
-        key.ok_or_else(|| ApiError::new(ApiErrorCode::InvalidCommand, "BOOT_KEY 缺少普通按键"))?;
-    KeyChord::new(modifiers, [key])
+    if modifiers == Modifiers::NONE && key.is_none() {
+        return Err(ApiError::new(
+            ApiErrorCode::InvalidCommand,
+            "BOOT_KEY 必须至少包含一个修饰键或普通按键",
+        ));
+    }
+    let keys = key.into_iter().collect::<Vec<_>>();
+    KeyChord::new(modifiers, keys)
         .map_err(|error| ApiError::new(ApiErrorCode::InvalidCommand, error.to_string()))
 }
 
@@ -207,20 +230,36 @@ fn parse_key(name: &str) -> Option<Key> {
         "9" => Key::Digit9,
         "0" => Key::Digit0,
         "ENTER" => Key::Enter,
-        "ESC" => Key::Escape,
+        "ESC" | "ESCAPE" => Key::Escape,
         "BACKSPACE" => Key::Backspace,
         "TAB" => Key::Tab,
         "SPACE" => Key::Space,
-        "INSERT" => Key::Insert,
+        "MINUS" | "-" => Key::Minus,
+        "EQUAL" | "=" => Key::Equal,
+        "LEFTBRACKET" | "[" => Key::LeftBracket,
+        "RIGHTBRACKET" | "]" => Key::RightBracket,
+        "BACKSLASH" | "\\" => Key::Backslash,
+        "SEMICOLON" | ";" => Key::Semicolon,
+        "QUOTE" | "'" => Key::Quote,
+        "GRAVE" | "`" => Key::Grave,
+        "COMMA" | "," => Key::Comma,
+        "DOT" | "." => Key::Dot,
+        "SLASH" | "/" => Key::Slash,
+        "CAPSLOCK" | "CAPS" => Key::CapsLock,
+        "PRINTSCREEN" | "PRTSC" => Key::PrintScreen,
+        "SCROLLLOCK" | "SCRLK" => Key::ScrollLock,
+        "PAUSE" => Key::Pause,
+        "INSERT" | "INS" => Key::Insert,
         "HOME" => Key::Home,
-        "PAGEUP" => Key::PageUp,
-        "DELETE" => Key::Delete,
+        "PAGEUP" | "PGUP" => Key::PageUp,
+        "DELETE" | "DEL" => Key::Delete,
         "END" => Key::End,
-        "PAGEDOWN" => Key::PageDown,
+        "PAGEDOWN" | "PGDN" => Key::PageDown,
         "RIGHT" => Key::ArrowRight,
         "LEFT" => Key::ArrowLeft,
         "DOWN" => Key::ArrowDown,
         "UP" => Key::ArrowUp,
+        "MENU" | "APPLICATION" | "APP" => Key::Menu,
         "F1" => Key::F1,
         "F2" => Key::F2,
         "F3" => Key::F3,
@@ -281,8 +320,64 @@ mod tests {
     }
 
     #[test]
-    fn boot_key_rejects_missing_multiple_or_unknown_normal_keys() {
-        for command in ["BOOT_KEY CTRL", "BOOT_KEY A B", "BOOT_KEY NONE A"] {
+    fn boot_key_parses_punctuation_and_function_keys() {
+        let ApiRequest::BootKey(chord) = parse_request("BOOT_KEY SHIFT MINUS").unwrap() else {
+            panic!("expected boot key");
+        };
+        assert_eq!(chord.modifiers, Modifiers::LEFT_SHIFT);
+        assert_eq!(chord.keys, vec![Key::Minus]);
+
+        let ApiRequest::BootKey(chord2) = parse_request("BOOT_KEY CTRL ALT DEL").unwrap() else {
+            panic!("expected boot key");
+        };
+        assert_eq!(
+            chord2.modifiers,
+            Modifiers::LEFT_CTRL | Modifiers::LEFT_ALT
+        );
+        assert_eq!(chord2.keys, vec![Key::Delete]);
+    }
+
+    #[test]
+    fn boot_key_supports_modifier_only_and_single_key() {
+        for (cmd, expected_mods) in [
+            ("BOOT_KEY SHIFT", Modifiers::LEFT_SHIFT),
+            ("BOOT_KEY RSHIFT", Modifiers::RIGHT_SHIFT),
+            ("BOOT_KEY CTRL", Modifiers::LEFT_CTRL),
+            ("BOOT_KEY ALT", Modifiers::LEFT_ALT),
+            ("BOOT_KEY GUI", Modifiers::LEFT_GUI),
+            (
+                "BOOT_KEY LCTRL RALT",
+                Modifiers::LEFT_CTRL | Modifiers::RIGHT_ALT,
+            ),
+        ] {
+            let ApiRequest::BootKey(chord) = parse_request(cmd).unwrap() else {
+                panic!("expected boot key");
+            };
+            assert_eq!(chord.modifiers, expected_mods);
+            assert!(chord.keys.is_empty());
+        }
+
+        let ApiRequest::BootKey(chord) = parse_request("BOOT_KEY A").unwrap() else {
+            panic!("expected boot key");
+        };
+        assert_eq!(chord.modifiers, Modifiers::NONE);
+        assert_eq!(chord.keys, vec![Key::A]);
+
+        let ApiRequest::BootKey(chord) = parse_request("BOOT_KEY SHIFT A").unwrap() else {
+            panic!("expected boot key");
+        };
+        assert_eq!(chord.modifiers, Modifiers::LEFT_SHIFT);
+        assert_eq!(chord.keys, vec![Key::A]);
+    }
+
+    #[test]
+    fn boot_key_rejects_empty_multiple_keys_or_unknown_names() {
+        for command in [
+            "BOOT_KEY",
+            "BOOT_KEY    ",
+            "BOOT_KEY A B",
+            "BOOT_KEY NONE A",
+        ] {
             assert_eq!(
                 parse_request(command).unwrap_err().code,
                 ApiErrorCode::InvalidCommand
@@ -294,6 +389,16 @@ mod tests {
     fn stop_is_not_a_public_command() {
         assert_eq!(
             parse_request("STOP").unwrap_err().code,
+            ApiErrorCode::InvalidCommand
+        );
+    }
+
+    #[test]
+    fn ping_and_status_have_no_arguments() {
+        assert_eq!(parse_request("PING").unwrap(), ApiRequest::Ping);
+        assert_eq!(parse_request("status").unwrap(), ApiRequest::Status);
+        assert_eq!(
+            parse_request("PING now").unwrap_err().code,
             ApiErrorCode::InvalidCommand
         );
     }

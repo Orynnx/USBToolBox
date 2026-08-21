@@ -11,6 +11,15 @@ use crate::usb_sub::{UsbError, UsbResult, UvcConfig};
 
 const SPEEDS: [&str; 3] = ["fs", "hs", "ss"];
 
+// The V4L2 backend reports a 16 KiB UVC payload in Probe/Commit.  Advertise
+// the matching SuperSpeed isochronous endpoint capacity as well: 1024 byte
+// packets with a burst of 16 packets.  Keeping ConfigFS at its kernel default
+// (one 1024 byte packet) makes the descriptor internally inconsistent and
+// Windows rejects the camera before it sends STREAMON.
+const STREAMING_INTERVAL: u8 = 1;
+const STREAMING_MAX_PACKET: u16 = 1024;
+const STREAMING_MAX_BURST: u8 = 15;
+
 /// 配置一个未链接、未绑定的 UVC Function。
 #[derive(Debug, Default)]
 pub struct UsbUvc;
@@ -27,11 +36,28 @@ impl UsbUvc {
             .map_err(|error| stage_error("ensure_function_directory", function_path, error))?;
         clear_function(function_path)
             .map_err(|error| stage_error("clear_function", function_path, error))?;
+        configure_transport(function_path)
+            .map_err(|error| stage_error("configure_transport", function_path, error))?;
         configure_formats(function_path, config)
             .map_err(|error| stage_error("configure_formats", function_path, error))?;
         configure_headers(function_path, config)
             .map_err(|error| stage_error("configure_headers", function_path, error))
     }
+}
+
+fn configure_transport(function_path: &Path) -> UsbResult<()> {
+    write_attribute(
+        &function_path.join("streaming_interval"),
+        STREAMING_INTERVAL,
+    )?;
+    write_attribute(
+        &function_path.join("streaming_maxpacket"),
+        STREAMING_MAX_PACKET,
+    )?;
+    write_attribute(
+        &function_path.join("streaming_maxburst"),
+        STREAMING_MAX_BURST,
+    )
 }
 
 fn configure_formats(function_path: &Path, config: &UvcConfig) -> UsbResult<()> {
@@ -52,6 +78,10 @@ fn configure_formats(function_path: &Path, config: &UvcConfig) -> UsbResult<()> 
                 &frame_path.join("dwMaxVideoFrameBufferSize"),
                 frame_buffer_size(frame.width, frame.height),
             )?;
+            let default_interval = frame_interval(*frame.fps.first().ok_or_else(|| {
+                UsbError::InvalidInput("UVC frame 缺少 fps".into())
+            })?)?;
+            write_attribute(&frame_path.join("dwDefaultFrameInterval"), default_interval)?;
             let intervals = frame
                 .fps
                 .iter()

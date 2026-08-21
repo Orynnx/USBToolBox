@@ -294,6 +294,7 @@ impl UsbSession {
         self.composite.serial_endpoint()
     }
 
+
     /// 在同一个 Daemon 会话中替换完整 USB 目标配置。
     ///
     /// ConfigFS 只能在 UDC 未绑定时调整 Function；`activate` 已负责解绑、重建链接并
@@ -470,6 +471,7 @@ impl UsbSession {
         }
     }
 }
+
 
 impl Drop for UsbSession {
     fn drop(&mut self) {

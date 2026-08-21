@@ -61,10 +61,7 @@ class _AppShellState extends State<AppShell> {
   int _currentIndex = 0;
   late final PageController _pageController;
 
-  final _pages = const [
-    MainScreen(),
-    SettingsScreen(),
-  ];
+  final _pages = const [MainScreen(), SettingsScreen()];
 
   @override
   void initState() {

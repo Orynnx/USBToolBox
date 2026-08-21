@@ -2,6 +2,9 @@
 
 import 'package:flutter/material.dart';
 import '../l10n/app_localizations.dart';
+import '../core/core_client.dart';
+import '../core/core_deployment_service.dart';
+import '../core/root_shell_service.dart';
 
 /// USB Core 管理页面
 class CoreSettingsScreen extends StatefulWidget {
@@ -12,19 +15,57 @@ class CoreSettingsScreen extends StatefulWidget {
 }
 
 class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
-  bool _isInstalled = true;
+  final _root = RootShellService();
+  late final _client = CoreClient(_root);
+  late final _deployment = CoreDeploymentService(_root, _client);
+  bool _isInstalled = false;
   bool _isProcessing = false;
+  String? _version;
+  bool _daemonRunning = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final status = await _deployment.getInstallationStatus();
+      if (mounted) {
+        setState(() {
+          _isInstalled = status.installed;
+          _daemonRunning = status.running;
+          _version = status.version;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isInstalled = false;
+          _daemonRunning = false;
+          _version = null;
+        });
+      }
+    }
+  }
 
   void _toggleInstallation() async {
     setState(() {
       _isProcessing = true;
     });
 
-    await Future.delayed(const Duration(milliseconds: 600));
+    try {
+      if (_isInstalled) {
+        await _deployment.remove();
+      } else {
+        await _deployment.ensureReady();
+      }
+      await _refresh();
+    } catch (_) {}
 
     if (!mounted) return;
     setState(() {
-      _isInstalled = !_isInstalled;
       _isProcessing = false;
     });
   }
@@ -37,9 +78,7 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
     final isDark = theme.brightness == Brightness.dark;
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(l10n.text('usbCoreSettings')),
-      ),
+      appBar: AppBar(title: Text(l10n.text('usbCoreSettings'))),
       body: ListView(
         padding: const EdgeInsets.all(16.0),
         children: [
@@ -54,11 +93,11 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
               side: BorderSide(
                 color: _isInstalled
                     ? (isDark
-                        ? const Color(0xff4ade80).withValues(alpha: 0.4)
-                        : const Color(0xff16a34a).withValues(alpha: 0.35))
+                          ? const Color(0xff4ade80).withValues(alpha: 0.4)
+                          : const Color(0xff16a34a).withValues(alpha: 0.35))
                     : (isDark
-                        ? const Color(0xfff59e0b).withValues(alpha: 0.4)
-                        : const Color(0xffd97706).withValues(alpha: 0.35)),
+                          ? const Color(0xfff59e0b).withValues(alpha: 0.4)
+                          : const Color(0xffd97706).withValues(alpha: 0.35)),
                 width: 1.2,
               ),
             ),
@@ -76,11 +115,11 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                         decoration: BoxDecoration(
                           color: _isInstalled
                               ? (isDark
-                                  ? const Color(0xff1b4832)
-                                  : const Color(0xffd4f4df))
+                                    ? const Color(0xff1b4832)
+                                    : const Color(0xffd4f4df))
                               : (isDark
-                                  ? const Color(0xff453420)
-                                  : const Color(0xfffed7aa)),
+                                    ? const Color(0xff453420)
+                                    : const Color(0xfffed7aa)),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
@@ -89,11 +128,11 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                               : Icons.cloud_download_outlined,
                           color: _isInstalled
                               ? (isDark
-                                  ? const Color(0xff4ade80)
-                                  : const Color(0xff16a34a))
+                                    ? const Color(0xff4ade80)
+                                    : const Color(0xff16a34a))
                               : (isDark
-                                  ? const Color(0xfffbbf24)
-                                  : const Color(0xffd97706)),
+                                    ? const Color(0xfffbbf24)
+                                    : const Color(0xffd97706)),
                           size: 24,
                         ),
                       ),
@@ -108,11 +147,11 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                             fontSize: 17,
                             color: _isInstalled
                                 ? (isDark
-                                    ? const Color(0xff86efac)
-                                    : const Color(0xff166534))
+                                      ? const Color(0xff86efac)
+                                      : const Color(0xff166534))
                                 : (isDark
-                                    ? const Color(0xfffde68a)
-                                    : const Color(0xff9a3412)),
+                                      ? const Color(0xfffde68a)
+                                      : const Color(0xff9a3412)),
                           ),
                         ),
                       ),
@@ -125,8 +164,9 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                     height: 44,
                     child: _isInstalled
                         ? OutlinedButton.icon(
-                            onPressed:
-                                _isProcessing ? null : _toggleInstallation,
+                            onPressed: _isProcessing
+                                ? null
+                                : _toggleInstallation,
                             icon: _isProcessing
                                 ? SizedBox(
                                     width: 18,
@@ -140,18 +180,21 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                                       ),
                                     ),
                                   )
-                                : const Icon(Icons.delete_outline_rounded,
-                                    size: 18),
+                                : const Icon(
+                                    Icons.delete_outline_rounded,
+                                    size: 18,
+                                  ),
                             label: Text(l10n.text('removeUsbCore')),
                             style: OutlinedButton.styleFrom(
                               foregroundColor: isDark
                                   ? const Color(0xfffca5a5)
                                   : const Color(0xffb91c1c),
                               side: BorderSide(
-                                color: (isDark
-                                        ? const Color(0xfffca5a5)
-                                        : const Color(0xffb91c1c))
-                                    .withValues(alpha: 0.35),
+                                color:
+                                    (isDark
+                                            ? const Color(0xfffca5a5)
+                                            : const Color(0xffb91c1c))
+                                        .withValues(alpha: 0.35),
                                 width: 1.2,
                               ),
                               shape: RoundedRectangleBorder(
@@ -160,8 +203,9 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                             ),
                           )
                         : FilledButton.icon(
-                            onPressed:
-                                _isProcessing ? null : _toggleInstallation,
+                            onPressed: _isProcessing
+                                ? null
+                                : _toggleInstallation,
                             icon: _isProcessing
                                 ? SizedBox(
                                     width: 18,
@@ -213,7 +257,7 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                 _buildInfoItem(
                   context,
                   title: l10n.text('coreVersion'),
-                  value: _isInstalled ? 'v1.2.0-release' : '—',
+                  value: _version ?? 'unavailable',
                 ),
                 Divider(
                   height: 1,
@@ -226,9 +270,7 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                 _buildInfoItem(
                   context,
                   title: l10n.text('buildTime'),
-                  value: _isInstalled
-                      ? '2026-08-21 18:30:00 (UTC+8)'
-                      : '—',
+                  value: 'unavailable',
                 ),
                 Divider(
                   height: 1,
@@ -241,7 +283,7 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                 _buildInfoItem(
                   context,
                   title: l10n.text('mountPath'),
-                  value: _isInstalled ? '/data/adb/modules/hyperusb' : '—',
+                  value: _isInstalled ? '/data/adb/usb_sub/hyperusbd' : '—',
                 ),
                 Divider(
                   height: 1,
@@ -254,8 +296,9 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
                 _buildInfoItem(
                   context,
                   title: l10n.text('socketPipe'),
-                  value:
-                      _isInstalled ? '/dev/socket/hyperusb_core.sock' : '—',
+                  value: _daemonRunning
+                      ? '/data/adb/usb_sub/usb.sock (ready)'
+                      : '/data/adb/usb_sub/usb.sock (not ready)',
                 ),
               ],
             ),
@@ -289,10 +332,7 @@ class _CoreSettingsScreenState extends State<CoreSettingsScreen> {
           const SizedBox(height: 4),
           Text(
             value,
-            style: const TextStyle(
-              fontSize: 14.5,
-              fontWeight: FontWeight.w600,
-            ),
+            style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600),
           ),
         ],
       ),

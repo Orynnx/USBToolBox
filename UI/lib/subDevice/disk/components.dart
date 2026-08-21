@@ -2,32 +2,19 @@
 
 import 'package:flutter/material.dart';
 import '../../../l10n/app_localizations.dart';
+import '../../../storage/services/document_picker_service.dart';
 
 /// 磁盘设备类型
-enum DiskDeviceType {
-  usb,
-  cdrom,
-}
+enum DiskDeviceType { usb, cdrom }
 
 /// 磁盘设备运行状态
-enum DiskDeviceState {
-  stopped,
-  operating,
-  running,
-}
+enum DiskDeviceState { stopped, operating, running }
 
 /// 磁盘访问模式
-enum DiskAccessMode {
-  readOnly,
-  readWrite,
-}
+enum DiskAccessMode { readOnly, readWrite }
 
 /// 磁盘启用失败/错误原因
-enum DiskErrorReason {
-  corruptedImage,
-  fileNotFound,
-  internalError,
-}
+enum DiskErrorReason { corruptedImage, fileNotFound, internalError }
 
 /// 虚拟磁盘数据模型
 class DiskDeviceItem {
@@ -41,6 +28,10 @@ class DiskDeviceItem {
   DiskAccessMode accessMode;
   bool enableFua;
   bool removableMedia;
+  String? treeUri;
+  String? sourceUri;
+  int? sourceSize;
+  String? documentUri;
 
   DiskDeviceItem({
     required this.id,
@@ -53,6 +44,10 @@ class DiskDeviceItem {
     this.accessMode = DiskAccessMode.readWrite,
     this.enableFua = false,
     this.removableMedia = true,
+    this.treeUri,
+    this.sourceUri,
+    this.sourceSize,
+    this.documentUri,
   });
 
   bool get isImg => path.toLowerCase().endsWith('.img');
@@ -69,6 +64,10 @@ class DiskDeviceItem {
     DiskAccessMode? accessMode,
     bool? enableFua,
     bool? removableMedia,
+    String? treeUri,
+    String? sourceUri,
+    int? sourceSize,
+    String? documentUri,
   }) {
     return DiskDeviceItem(
       id: id ?? this.id,
@@ -81,6 +80,10 @@ class DiskDeviceItem {
       accessMode: accessMode ?? this.accessMode,
       enableFua: enableFua ?? this.enableFua,
       removableMedia: removableMedia ?? this.removableMedia,
+      treeUri: treeUri ?? this.treeUri,
+      sourceUri: sourceUri ?? this.sourceUri,
+      sourceSize: sourceSize ?? this.sourceSize,
+      documentUri: documentUri ?? this.documentUri,
     );
   }
 }
@@ -123,9 +126,7 @@ class DiskActionButton extends StatelessWidget {
         final greenColor = isDark
             ? const Color(0xff4ade80)
             : const Color(0xff16a34a);
-        bgColor = isDark
-            ? const Color(0xff143527)
-            : const Color(0xffdcfce7);
+        bgColor = isDark ? const Color(0xff143527) : const Color(0xffdcfce7);
         border = Border.all(
           color: greenColor.withValues(alpha: 0.35),
           width: 1.2,
@@ -275,7 +276,9 @@ class DiskStatusHeader extends StatelessWidget {
                   padding: const EdgeInsets.only(left: 15),
                   child: Text(
                     hasMounted
-                        ? l10n.text('devicesSharing').replaceAll('%d', '$mountedCount')
+                        ? l10n
+                              .text('devicesSharing')
+                              .replaceAll('%d', '$mountedCount')
                         : l10n.text('noDevicesSharing'),
                     style: TextStyle(
                       fontSize: 12,
@@ -292,7 +295,10 @@ class DiskStatusHeader extends StatelessWidget {
               style: TextButton.styleFrom(
                 foregroundColor: colorScheme.error,
                 visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8),
                 ),
@@ -442,6 +448,18 @@ class DiskDeviceCard extends StatelessWidget {
                   constraints: const BoxConstraints(),
                   color: colorScheme.onSurfaceVariant,
                 ),
+                if (onDelete != null) ...[
+                  const SizedBox(width: 4),
+                  IconButton(
+                    tooltip: l10n.text('delete'),
+                    icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                    onPressed: onDelete,
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.all(6),
+                    constraints: const BoxConstraints(),
+                    color: colorScheme.error,
+                  ),
+                ],
                 const SizedBox(width: 10),
 
                 // 主操作按钮
@@ -715,8 +733,9 @@ class DiskErrorBottomSheet extends StatelessWidget {
                   label: Text(l10n.text('delete')),
                   style: FilledButton.styleFrom(
                     foregroundColor: colorScheme.error,
-                    backgroundColor:
-                        colorScheme.errorContainer.withValues(alpha: 0.65),
+                    backgroundColor: colorScheme.errorContainer.withValues(
+                      alpha: 0.65,
+                    ),
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -734,10 +753,7 @@ class DiskErrorBottomSheet extends StatelessWidget {
 
 /// 新建磁盘底部菜单
 class DiskCreateBottomSheet extends StatefulWidget {
-  const DiskCreateBottomSheet({
-    super.key,
-    required this.onCreate,
-  });
+  const DiskCreateBottomSheet({super.key, required this.onCreate});
 
   final ValueChanged<DiskDeviceItem> onCreate;
 
@@ -754,9 +770,7 @@ class DiskCreateBottomSheet extends StatefulWidget {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
-      builder: (ctx) => DiskCreateBottomSheet(
-        onCreate: onCreate,
-      ),
+      builder: (ctx) => DiskCreateBottomSheet(onCreate: onCreate),
     );
   }
 
@@ -771,10 +785,10 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
 
   static const List<double> _presetGbValues = [
     0.125, // 128MB
-    1.0,   // 1GB
-    8.0,   // 8GB
-    16.0,  // 16GB
-    64.0,  // 64GB
+    1.0, // 1GB
+    8.0, // 8GB
+    16.0, // 16GB
+    64.0, // 64GB
     128.0, // 128GB
     256.0, // 256GB
   ];
@@ -790,17 +804,16 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
   ];
 
   double _sliderIndex = 3.0; // 默认 16GB
-  String _fileSystem = 'FAT32';
-
   String? _nameError;
   String? _pathError;
   String? _sizeError;
+  DirectorySelection? _directory;
 
   @override
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: 'Virtual Disk');
-    _pathController = TextEditingController(text: '/sdcard/images');
+    _pathController = TextEditingController();
     _sizeController = TextEditingController(text: '16');
 
     _nameController.addListener(_onNameChanged);
@@ -952,6 +965,7 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
                   Expanded(
                     child: TextField(
                       controller: _pathController,
+                      readOnly: true,
                       decoration: InputDecoration(
                         labelText: l10n.text('storageDirectory'),
                         hintText: l10n.text('storageDirectoryHint'),
@@ -969,11 +983,12 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
                     borderRadius: BorderRadius.circular(14),
                     child: InkWell(
                       borderRadius: BorderRadius.circular(14),
-                      onTap: () {
-                        if (_pathController.text == '/sdcard/images') {
-                          _pathController.text = '/sdcard/Download';
-                        } else {
-                          _pathController.text = '/sdcard/images';
+                      onTap: () async {
+                        final selected =
+                            await DocumentPickerService.pickDirectory();
+                        if (selected != null && mounted) {
+                          _directory = selected;
+                          _pathController.text = selected.path;
                         }
                       },
                       child: Container(
@@ -995,8 +1010,9 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
             // 第四行：输入框 GB
             TextField(
               controller: _sizeController,
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
               decoration: InputDecoration(
                 labelText: l10n.text('diskCapacity'),
                 hintText: l10n.text('diskCapacityHint'),
@@ -1024,8 +1040,9 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
                     activeTrackColor: colorScheme.primary,
                     inactiveTrackColor: colorScheme.surfaceContainerHighest,
                     thumbColor: colorScheme.primary,
-                    overlayShape:
-                        const RoundSliderOverlayShape(overlayRadius: 18),
+                    overlayShape: const RoundSliderOverlayShape(
+                      overlayRadius: 18,
+                    ),
                   ),
                   child: Slider(
                     value: _sliderIndex,
@@ -1050,14 +1067,16 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: _presetLabels
-                        .map((lbl) => Text(
-                              lbl,
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: colorScheme.onSurfaceVariant,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ))
+                        .map(
+                          (lbl) => Text(
+                            lbl,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colorScheme.onSurfaceVariant,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        )
                         .toList(),
                   ),
                 ),
@@ -1065,29 +1084,14 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
             ),
             const SizedBox(height: 18),
 
-            // 第六行：多选一横向选择器 NTFS FAT32 exFAT（无打勾图标）
-            SegmentedButton<String>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(
-                  value: 'FAT32',
-                  label: Text('FAT32'),
-                ),
-                ButtonSegment(
-                  value: 'exFAT',
-                  label: Text('exFAT'),
-                ),
-                ButtonSegment(
-                  value: 'NTFS',
-                  label: Text('NTFS'),
-                ),
-              ],
-              selected: {_fileSystem},
-              onSelectionChanged: (val) {
-                setState(() {
-                  _fileSystem = val.first;
-                });
-              },
+            Card(
+              elevation: 0,
+              color: colorScheme.surfaceContainerLow,
+              child: ListTile(
+                leading: const Icon(Icons.info_outline_rounded),
+                title: Text(l10n.text('rawImageTitle')),
+                subtitle: Text(l10n.text('rawImageDescription')),
+              ),
             ),
             const SizedBox(height: 24),
 
@@ -1113,12 +1117,12 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
                       if (!_validateAll()) return;
 
                       final name = _nameController.text.trim();
-                      final folder = _pathController.text
-                          .trim()
-                          .replaceAll(RegExp(r'[/\\]+$'), '');
+                      final folder = _pathController.text.trim().replaceAll(
+                        RegExp(r'[/\\]+$'),
+                        '',
+                      );
                       final cleanName = name
-                          .replaceAll(
-                              RegExp(r'[^\w\u4e00-\u9fa5\-_]+'), '_')
+                          .replaceAll(RegExp(r'[^\w\u4e00-\u9fa5\-_]+'), '_')
                           .toLowerCase();
                       final fullPath =
                           '$folder/${cleanName.isEmpty ? "disk" : cleanName}.img';
@@ -1129,17 +1133,23 @@ class _DiskCreateBottomSheetState extends State<DiskCreateBottomSheet> {
                           ? '${(sizeGb * 1024).round()} MB'
                           : '${sizeGb % 1 == 0 ? sizeGb.toInt() : sizeGb} GB';
 
+                      if (_directory == null) {
+                        _pathError = l10n.text('selectDestinationFolder');
+                        setState(() {});
+                        return;
+                      }
                       final newDisk = DiskDeviceItem(
                         id: 'disk_${DateTime.now().millisecondsSinceEpoch}',
                         name: name,
                         path: fullPath,
                         size: formattedSize,
-                        fileSystem: _fileSystem,
+                        fileSystem: 'RAW',
                         type: DiskDeviceType.usb,
                         state: DiskDeviceState.stopped,
                         accessMode: DiskAccessMode.readWrite,
                         enableFua: false,
                         removableMedia: true,
+                        treeUri: _directory!.uri,
                       );
 
                       widget.onCreate(newDisk);
@@ -1169,10 +1179,12 @@ class DiskEditBottomSheet extends StatefulWidget {
     super.key,
     required this.initialItem,
     required this.onSave,
+    this.isImport = false,
   });
 
   final DiskDeviceItem initialItem;
   final ValueChanged<DiskDeviceItem> onSave;
+  final bool isImport;
 
   /// 弹出底部菜单静态工具方法
   static Future<void> show(
@@ -1188,9 +1200,27 @@ class DiskEditBottomSheet extends StatefulWidget {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
+      builder: (ctx) => DiskEditBottomSheet(initialItem: item, onSave: onSave),
+    );
+  }
+
+  static Future<void> showImport(
+    BuildContext context, {
+    required DiskDeviceItem item,
+    required ValueChanged<DiskDeviceItem> onSave,
+  }) {
+    return showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
       builder: (ctx) => DiskEditBottomSheet(
         initialItem: item,
         onSave: onSave,
+        isImport: true,
       ),
     );
   }
@@ -1208,6 +1238,8 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
 
   String? _nameError;
   String? _pathError;
+  DocumentSelection? _source;
+  DirectorySelection? _destination;
 
   @override
   void initState() {
@@ -1264,7 +1296,8 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
     }
 
     final lower = val.toLowerCase();
-    final hasSupportedExt = lower.endsWith('.img') ||
+    final hasSupportedExt =
+        lower.endsWith('.img') ||
         lower.endsWith('.iso') ||
         lower.endsWith('.bin') ||
         lower.endsWith('.raw');
@@ -1309,7 +1342,9 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
           children: [
             // 第一行标题：编辑磁盘
             Text(
-              l10n.text('editDisk'),
+              widget.isImport
+                  ? l10n.text('importImage')
+                  : l10n.text('editDisk'),
               style: theme.textTheme.titleLarge?.copyWith(
                 fontWeight: FontWeight.bold,
               ),
@@ -1339,6 +1374,7 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
                   Expanded(
                     child: TextField(
                       controller: _pathController,
+                      readOnly: widget.isImport,
                       decoration: InputDecoration(
                         labelText: l10n.text('filePath'),
                         hintText: l10n.text('filePathHint'),
@@ -1346,7 +1382,9 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(14),
                         ),
-                        prefixIcon: const Icon(Icons.insert_drive_file_outlined),
+                        prefixIcon: const Icon(
+                          Icons.insert_drive_file_outlined,
+                        ),
                       ),
                     ),
                   ),
@@ -1357,12 +1395,18 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
                     borderRadius: BorderRadius.circular(14),
                     child: InkWell(
                       borderRadius: BorderRadius.circular(14),
-                      onTap: () {
-                        // 预设路径快速选择示例
-                        if (_pathController.text.endsWith('.iso')) {
-                          _pathController.text = '/sdcard/images/archlinux.img';
-                        } else {
-                          _pathController.text = '/sdcard/images/windows11.iso';
+                      onTap: () async {
+                        final source = await DocumentPickerService.pickFile();
+                        if (source == null || !mounted) return;
+                        final destination =
+                            await DocumentPickerService.pickDirectory();
+                        if (destination == null || !mounted) return;
+                        _source = source;
+                        _destination = destination;
+                        _pathController.text =
+                            '${destination.path}/${source.name}';
+                        if (_nameController.text.trim().isEmpty) {
+                          _nameController.text = source.name;
                         }
                       },
                       child: Container(
@@ -1536,13 +1580,13 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
                       final String fileSystem = ext.endsWith('.iso')
                           ? 'ISO'
                           : ext.endsWith('.raw')
-                              ? 'RAW'
-                              : ext.endsWith('.bin')
-                                  ? 'BIN'
-                                  : (widget.initialItem.fileSystem.isEmpty ||
-                                          widget.initialItem.fileSystem == 'RAW'
-                                      ? 'FAT32'
-                                      : widget.initialItem.fileSystem);
+                          ? 'RAW'
+                          : ext.endsWith('.bin')
+                          ? 'BIN'
+                          : (widget.initialItem.fileSystem.isEmpty ||
+                                    widget.initialItem.fileSystem == 'RAW'
+                                ? 'FAT32'
+                                : widget.initialItem.fileSystem);
 
                       final updated = widget.initialItem.copyWith(
                         name: name,
@@ -1554,6 +1598,9 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
                         accessMode: _accessMode,
                         enableFua: _enableFua,
                         removableMedia: _removableMedia,
+                        treeUri: _destination?.uri,
+                        sourceUri: _source?.uri,
+                        sourceSize: _source?.size,
                       );
                       widget.onSave(updated);
                       Navigator.of(context).pop();
@@ -1564,13 +1611,124 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child: Text(l10n.text('save')),
+                    child: Text(
+                      widget.isImport
+                          ? l10n.text('importImage')
+                          : l10n.text('save'),
+                    ),
                   ),
                 ),
               ],
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class DiskDeleteDecision {
+  const DiskDeleteDecision({required this.deleteImageFile});
+  final bool deleteImageFile;
+}
+
+class DiskDeleteBottomSheet extends StatefulWidget {
+  const DiskDeleteBottomSheet({
+    super.key,
+    required this.diskName,
+    required this.canDeleteImageFile,
+  });
+
+  final String diskName;
+  final bool canDeleteImageFile;
+
+  static Future<DiskDeleteDecision?> show(
+    BuildContext context, {
+    required String diskName,
+    required bool canDeleteImageFile,
+  }) => showModalBottomSheet<DiskDeleteDecision>(
+    context: context,
+    showDragHandle: true,
+    useSafeArea: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+    ),
+    builder: (_) => DiskDeleteBottomSheet(
+      diskName: diskName,
+      canDeleteImageFile: canDeleteImageFile,
+    ),
+  );
+
+  @override
+  State<DiskDeleteBottomSheet> createState() => _DiskDeleteBottomSheetState();
+}
+
+class _DiskDeleteBottomSheetState extends State<DiskDeleteBottomSheet> {
+  bool _deleteImageFile = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            context.l10n.text('deleteConfirmTitle'),
+            style: Theme.of(
+              context,
+            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            context.l10n
+                .text('deleteConfigDescription')
+                .replaceAll('%s', widget.diskName),
+            style: TextStyle(color: colors.onSurfaceVariant),
+          ),
+          const SizedBox(height: 12),
+          CheckboxListTile(
+            value: _deleteImageFile,
+            onChanged: widget.canDeleteImageFile
+                ? (value) => setState(() => _deleteImageFile = value ?? false)
+                : null,
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            title: Text(context.l10n.text('deleteImageFile')),
+            subtitle: Text(
+              widget.canDeleteImageFile
+                  ? context.l10n.text('deleteImageFileDescription')
+                  : context.l10n.text('deleteImageUnavailable'),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(context.l10n.text('cancel')),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: colors.error,
+                    foregroundColor: colors.onError,
+                  ),
+                  onPressed: () => Navigator.pop(
+                    context,
+                    DiskDeleteDecision(deleteImageFile: _deleteImageFile),
+                  ),
+                  child: Text(context.l10n.text('confirm')),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

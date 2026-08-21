@@ -313,7 +313,10 @@ impl UvcV4l2Backend {
             let mut event: V4l2Event = unsafe { zeroed() };
             match self.ioctl(VIDIOC_DQEVENT, &mut event) {
                 Ok(()) => self.handle_event(&event, state)?,
-                Err(error) if is_would_block(&error) => break,
+                // Xiaomi's g_uvc implementation reports ENOENT while its
+                // event queue is empty. This does not mean that the video
+                // node disappeared, so do not tear down a healthy stream.
+                Err(error) if is_no_event_available(&error) => break,
                 Err(error) => return Err(error),
             }
         }
@@ -1002,6 +1005,10 @@ fn set_u32(bytes: &mut [u8], offset: usize, value: u32) {
 
 fn is_would_block(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::EAGAIN)
+}
+
+fn is_no_event_available(error: &io::Error) -> bool {
+    is_would_block(error) || error.raw_os_error() == Some(libc::ENOENT)
 }
 
 const fn ioc_read(type_: u8, number: u8, size: usize) -> u32 {

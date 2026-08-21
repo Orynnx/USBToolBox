@@ -140,13 +140,16 @@ class AppThemeManager extends ChangeNotifier {
             radix: 16,
           );
           if (parsed != null) {
-            _seedColor = Color(parsed > 0xffffff ? parsed : parsed | 0xff000000);
+            _seedColor = Color(
+              parsed > 0xffffff ? parsed : parsed | 0xff000000,
+            );
           }
         }
 
         // 4. 读取预设色 ID
         if (themeConfig.containsKey('preset_id')) {
-          _currentPresetId = themeConfig['preset_id'] as String? ?? 'lavender_blue';
+          _currentPresetId =
+              themeConfig['preset_id'] as String? ?? 'lavender_blue';
         }
 
         // 5. 读取预测性返回手势开关
@@ -186,7 +189,8 @@ class AppThemeManager extends ChangeNotifier {
     AppConfig.updateSection('theme', {
       'mode': modeStr,
       'use_dynamic_color': _useDynamicColor,
-      'seed_color': '0x${_seedColor.toARGB32().toRadixString(16).padLeft(8, '0')}',
+      'seed_color':
+          '0x${_seedColor.toARGB32().toRadixString(16).padLeft(8, '0')}',
       'preset_id': _currentPresetId,
       'enable_predictive_back': _enablePredictiveBack,
       'disable_animations': _disableAnimations,

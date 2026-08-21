@@ -39,9 +39,12 @@ impl UsbController {
     }
 
     fn execute(&mut self, request: ApiRequest) -> ApiResponse {
+        if matches!(request, ApiRequest::Ping) { return ApiResponse::Ok; }
+        if matches!(request, ApiRequest::Status) { return ApiResponse::Status(self.status_json()); }
         let result = match request {
             ApiRequest::Set(path) => self.set(&path),
             ApiRequest::BootKey(chord) => self.boot_key(&chord),
+            ApiRequest::Ping | ApiRequest::Status => unreachable!("handled above"),
         };
         match result {
             Ok(()) => ApiResponse::Ok,
@@ -51,6 +54,24 @@ impl UsbController {
             }
         }
     }
+
+    fn status_json(&self) -> String {
+        let Some(session) = &self.session else {
+            return r#"{"state":"android","storageLuns":[],"keyboard":false,"serial":false,"uvc":false}"#.into();
+        };
+        let profile = session.profile();
+        let luns = profile.storage_luns.iter().map(|lun| serde_json::json!({
+            "imagePath": lun.image.as_ref().map(|path| path.to_string_lossy().into_owned()),
+            "readOnly": lun.read_only, "removable": lun.removable,
+            "cdrom": lun.cdrom, "noFua": lun.no_fua,
+        })).collect::<Vec<_>>();
+        serde_json::json!({
+            "state": "active", "storageLuns": luns,
+            "keyboard": profile.keyboard_enabled, "serial": profile.serial_enabled,
+            "uvc": profile.uvc.is_some(), "udc": session.udc(),
+        }).to_string()
+    }
+
 
     fn set(&mut self, path: &Path) -> Result<(), ApiError> {
         let target = load_configuration(path)?;
@@ -179,6 +200,7 @@ fn map_start_error(error: UsbError) -> ApiError {
 fn internal_error(error: UsbError) -> ApiError {
     ApiError::new(ApiErrorCode::InternalError, error.to_string())
 }
+
 
 #[cfg(unix)]
 mod platform {

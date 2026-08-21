@@ -10,9 +10,7 @@ class AboutSettingsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text(context.l10n.text('about')),
-      ),
+      appBar: AppBar(title: Text(context.l10n.text('about'))),
       body: const SizedBox.shrink(),
     );
   }

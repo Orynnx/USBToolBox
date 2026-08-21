@@ -10,10 +10,12 @@ HyperUSB Core 是常驻 Root Daemon。上层通过 Unix Domain Socket **声明�
 
 ## 1. 协议
 
-公开命令只有：
+公开命令：
 
 ```text
 SET <absolute-config-path>
+PING
+STATUS
 BOOT_KEY <modifier>... <key>
 ```
 
@@ -23,6 +25,14 @@ BOOT_KEY <modifier>... <key>
 OK
 ERR <code>
 ```
+
+`PING` 无参数，活着的 Daemon 返回 `OK`。`STATUS` 无参数，返回单行 JSON：
+
+```text
+OK {"state":"active","storageLuns":[...],"keyboard":false,"serial":false,"uvc":false,"udc":"..."}
+```
+
+停止状态为 `state:"android"` 且 `storageLuns` 为空。状态由 Core 的实际会话生成，不能由 Socket 文件存在与否推断。
 
 每条命令以 `\n` 或 `\r\n` 结束，最大 8 KiB。一个连接可以连续执行多条命令。命令名和按键名大小写不敏感，参数使用一个或多个 ASCII 空白分隔。
 
@@ -431,6 +441,7 @@ Press Report
 示例：
 
 ```text
+BOOT_KEY SHIFT
 BOOT_KEY ENTER
 BOOT_KEY ALT F4
 BOOT_KEY CTRL SHIFT ESC
@@ -462,9 +473,8 @@ RGUI
 必须包含：
 
 ```text
-0 个或多个 modifier
-+
-恰好 1 个普通键
+至少 1 个 modifier 或 1 个普通键
+（普通键最多 1 个）
 ```
 
 支持：
@@ -473,8 +483,10 @@ RGUI
 A..Z
 0..9
 F1..F12
-导航键
-编辑键
+导航键（UP, DOWN, LEFT, RIGHT, HOME, END, PAGEUP, PAGEDOWN）
+编辑键（ENTER, ESC, BACKSPACE, TAB, SPACE, INSERT, DELETE）
+标点符号键（MINUS/-, EQUAL/=, LEFTBRACKET/[, RIGHTBRACKET/], BACKSLASH/\, SEMICOLON/;, QUOTE/', GRAVE/`, COMMA/,, DOT/., SLASH//）
+特殊功能键（CAPSLOCK, PRINTSCREEN/PRTSC, SCROLLLOCK/SCRLK, PAUSE, MENU/APPLICATION）
 ```
 
 命令、modifier和普通键名大小写不敏感；多余的首尾空白、连续空白以及重复 modifier会被归一化。
@@ -487,7 +499,7 @@ ERR invalid_command
 
 包括：
 
-* 缺少普通键。
+* 参数为空（未提供任何 modifier 或普通键）。
 * 出现多个普通键。
 * 未知键名。
 
@@ -574,6 +586,7 @@ invalid_pid
 invalid_device_version
 image_not_found
 image_not_file
+duplicate_backing_file
 not_started
 boot_disabled
 apply_failed
@@ -596,6 +609,9 @@ HyperUSBCore
 ```text
 SET <config>
     = 声明 USB 应该处于什么状态
+
+PING / STATUS
+    = 检查 Daemon 存活并读取实际会话状态
 
 BOOT_KEY <chord>
     = 执行一次 Boot Keyboard 组合键

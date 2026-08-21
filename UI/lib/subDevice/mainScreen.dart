@@ -3,7 +3,11 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import '../core/core_client.dart';
+import '../core/root_shell_service.dart';
 import '../l10n/app_localizations.dart';
+import '../storage/services/disk_storage_service.dart';
+import '../usb/usb_session_service.dart';
 import 'cam/camScreen.dart';
 import 'disk/diskScreen.dart';
 import 'hid/hidScreen.dart';
@@ -16,15 +20,30 @@ import '../theme/app_theme.dart';
 ///
 /// 汇总展示 HyperUSB 总控制器运行状态、5 种虚拟子设备（磁盘、HID 键盘、虚拟网卡、UVC 摄像头、虚拟串口）的快速入口及运行环境信息。
 class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
+  const MainScreen({
+    super.key,
+    this.client,
+    this.session,
+    this.disks,
+  });
+
+  final CoreClient? client;
+  final UsbSessionService? session;
+  final DiskStorageService? disks;
 
   @override
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> {
+class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
+  late final CoreClient _client;
+  late final UsbSessionService _session;
+  late final DiskStorageService _disks;
+
   /// HyperUSB 核心服务总运行状态（true: 运行中, false: 已停止）
   bool _running = false;
+  bool _coreConnected = false;
+  bool _isOperating = false;
 
   /// 各子设备的启用激活状态映射表
   final _enabled = <String, bool>{
@@ -35,9 +54,109 @@ class _MainScreenState extends State<MainScreen> {
     'serial': false, // 虚拟串口
   };
 
-  /// 页面导航辅助方法，推入指定的子设备详情配置页面
-  void _open(Widget page) =>
-      Navigator.of(context).push(AppPageRoute(builder: (_) => page));
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _client = widget.client ?? CoreClient(RootShellService());
+    _session = widget.session ?? UsbSessionService.instance;
+    _disks = widget.disks ?? DiskStorageService();
+    _refreshStatus();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshStatus();
+    }
+  }
+
+  Future<void> _refreshStatus() async {
+    try {
+      final status = await _client.getStatus();
+      if (!mounted) return;
+      setState(() {
+        _coreConnected = true;
+        _running = status.active;
+        _enabled['disk'] = status.active && status.storageLuns.isNotEmpty;
+        _enabled['hid'] = status.active && status.keyboard;
+        _enabled['serial'] = status.active && status.serial;
+        _enabled['cam'] = status.active && status.uvc;
+        _enabled['net'] = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _coreConnected = false;
+        _running = false;
+        _enabled['disk'] = false;
+        _enabled['hid'] = false;
+        _enabled['serial'] = false;
+        _enabled['cam'] = false;
+        _enabled['net'] = false;
+      });
+    }
+  }
+
+  Future<void> _toggleMaster() async {
+    if (_isOperating) return;
+    setState(() => _isOperating = true);
+    try {
+      if (_running) {
+        final status = await _session.stopAll();
+        if (!mounted) return;
+        setState(() {
+          _coreConnected = true;
+          _running = status.active;
+          _enabled['disk'] = false;
+          _enabled['hid'] = false;
+          _enabled['serial'] = false;
+          _enabled['cam'] = false;
+          _enabled['net'] = false;
+        });
+      } else {
+        final disks = await _disks.load();
+        final status = await _session.apply(disks);
+        if (!mounted) return;
+        setState(() {
+          _coreConnected = true;
+          _running = status.active;
+          _enabled['disk'] = status.active && status.storageLuns.isNotEmpty;
+          _enabled['hid'] = status.active && status.keyboard;
+          _enabled['serial'] = status.active && status.serial;
+          _enabled['cam'] = status.active && status.uvc;
+          _enabled['net'] = false;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(error.toString()),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isOperating = false);
+      }
+    }
+  }
+
+  /// 页面导航辅助方法，推入指定的子设备详情配置页面并在返回时刷新真实状态
+  Future<void> _open(Widget page) async {
+    await Navigator.of(context).push(AppPageRoute(builder: (_) => page));
+    if (mounted) {
+      await _refreshStatus();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -71,7 +190,7 @@ class _MainScreenState extends State<MainScreen> {
                     Expanded(
                       child: _ControllerCard(
                         running: _running,
-                        onTap: () => setState(() => _running = !_running),
+                        onTap: _toggleMaster,
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -171,7 +290,7 @@ class _MainScreenState extends State<MainScreen> {
                     // 底层 Core 原生库集成状态
                     _InfoLine(
                       l.text('coreIntegration'),
-                      l.text('notConnected'),
+                      _coreConnected ? l.text('connected') : l.text('notConnected'),
                     ),
                   ],
                 ),
@@ -374,9 +493,7 @@ class _StatusGlyphState extends State<_StatusGlyph>
             isRunning
                 ? Icons.check_circle_outline_rounded
                 : Icons.cancel_rounded,
-            color: isRunning
-                ? colorScheme.primary
-                : colorScheme.error,
+            color: isRunning ? colorScheme.primary : colorScheme.error,
             size: 112,
           ),
         ),
@@ -499,7 +616,10 @@ class _InfoLine extends StatelessWidget {
           const SizedBox(height: 2),
           Text(
             value,
-            style: TextStyle(color: colorScheme.onSurfaceVariant, fontSize: 12.5),
+            style: TextStyle(
+              color: colorScheme.onSurfaceVariant,
+              fontSize: 12.5,
+            ),
           ),
         ],
       ),

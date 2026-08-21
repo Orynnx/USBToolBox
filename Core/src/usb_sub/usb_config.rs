@@ -22,6 +22,8 @@ struct ConfigFile {
     #[serde(default)]
     disk: DiskConfig,
     #[serde(default)]
+    storage: StorageConfig,
+    #[serde(default)]
     keyboard: KeyboardConfig,
     #[serde(default)]
     serial: SerialConfig,
@@ -56,6 +58,28 @@ struct DiskConfig {
     removable: bool,
     #[serde(default)]
     cdrom: bool,
+    no_fua: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageConfig {
+    #[serde(default)]
+    luns: Vec<StorageLunConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageLunConfig {
+    image_path: PathBuf,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default = "default_removable")]
+    removable: bool,
+    #[serde(default)]
+    cdrom: bool,
+    #[serde(default)]
+    no_fua: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -152,6 +176,12 @@ pub fn parse_configuration(snapshot: &[u8]) -> ApiResult<UsbTargetState> {
             format!("配置 JSON 无效：{error}"),
         )
     })?;
+    if config.disk.enabled && !config.storage.luns.is_empty() {
+        return Err(ApiError::new(
+            ApiErrorCode::InvalidConfig,
+            "legacy disk 与 storage.luns 不能同时启用",
+        ));
+    }
     let mut storage_luns = Vec::new();
     if config.disk.enabled {
         let image = config.disk.image_path.ok_or_else(|| {
@@ -175,14 +205,16 @@ pub fn parse_configuration(snapshot: &[u8]) -> ApiResult<UsbTargetState> {
             config.disk.read_only.unwrap_or(false)
         };
         storage_luns.push(StorageLun {
-            image: Some(image),
-            read_only,
-            removable: config.disk.removable,
-            cdrom: config.disk.cdrom,
-            no_fua: config.disk.cdrom,
+            image: Some(image), read_only, removable: config.disk.removable,
+            cdrom: config.disk.cdrom, no_fua: config.disk.no_fua.unwrap_or(config.disk.cdrom),
             ejected: false,
         });
+    } else {
+        for lun in config.storage.luns {
+            storage_luns.push(parse_storage_lun(lun)?);
+        }
     }
+    reject_duplicate_backing_files(&storage_luns)?;
 
     let profile = UsbProfile {
         keyboard_enabled: config.keyboard.boot,
@@ -225,6 +257,38 @@ pub fn parse_configuration(snapshot: &[u8]) -> ApiResult<UsbTargetState> {
         .validate()
         .map_err(|error| ApiError::new(ApiErrorCode::InvalidConfig, error.to_string()))?;
     Ok(UsbTargetState::HyperUsb(configuration))
+}
+
+fn parse_storage_lun(lun: StorageLunConfig) -> ApiResult<StorageLun> {
+    validate_image_path(&lun.image_path)?;
+    if lun.cdrom && !lun.read_only {
+        return Err(ApiError::new(
+            ApiErrorCode::InvalidConfig,
+            "cdrom=true 时 readOnly 必须为 true",
+        ));
+    }
+    Ok(StorageLun {
+        image: Some(lun.image_path), read_only: lun.read_only, removable: lun.removable,
+        cdrom: lun.cdrom, no_fua: lun.no_fua, ejected: false,
+    })
+}
+
+fn reject_duplicate_backing_files(luns: &[StorageLun]) -> ApiResult<()> {
+    let mut seen = std::collections::HashSet::new();
+    for lun in luns {
+        let image = lun.image.as_ref().expect("parsed storage LUN has an image");
+        let canonical = std::fs::canonicalize(image).map_err(|error| ApiError::new(
+            ApiErrorCode::InvalidConfig,
+            format!("无法规范化镜像 {}：{error}", image.display()),
+        ))?;
+        if !seen.insert(canonical) {
+            return Err(ApiError::new(
+                ApiErrorCode::DuplicateBackingFile,
+                "同一 backing file 不能被多个活动 LUN 同时使用",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_uvc_config(config: UvcFileConfig) -> ApiResult<Option<UvcConfig>> {
@@ -623,6 +687,72 @@ mod tests {
                 .code,
             ApiErrorCode::InvalidConfig
         );
+        let _ = std::fs::remove_file(image);
+    }
+
+    #[test]
+    fn legacy_disk_becomes_one_lun() {
+        let image = test_path("legacy.img");
+        std::fs::write(&image, b"disk").unwrap();
+        let json = serde_json::json!({
+            "device": {"serialNumber": "TEST"},
+            "disk": {"enabled": true, "imagePath": image, "noFua": true}
+        });
+        let profile = active(parse_configuration(&serde_json::to_vec(&json).unwrap()).unwrap()).profile;
+        assert_eq!(profile.storage_luns.len(), 1);
+        assert!(profile.storage_luns[0].no_fua);
+        let _ = std::fs::remove_file(image);
+    }
+
+    #[test]
+    fn storage_luns_support_multiple_images_and_empty_target() {
+        let first = test_path("first.img");
+        let second = test_path("second.img");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let json = serde_json::json!({
+            "device": {"serialNumber": "TEST"},
+            "storage": {"luns": [
+                {"imagePath": first, "readOnly": false, "noFua": false},
+                {"imagePath": second, "readOnly": true, "removable": true, "noFua": true}
+            ]}
+        });
+        let profile = active(parse_configuration(&serde_json::to_vec(&json).unwrap()).unwrap()).profile;
+        assert_eq!(profile.storage_luns.len(), 2);
+        assert!(!profile.storage_luns[0].no_fua);
+        assert!(profile.storage_luns[1].no_fua);
+        assert_eq!(
+            parse_configuration(br#"{"storage":{"luns":[]}}"#).unwrap(),
+            UsbTargetState::AndroidUsb
+        );
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
+    }
+
+    #[test]
+    fn storage_luns_reject_duplicate_and_legacy_conflict() {
+        let image = test_path("duplicate.img");
+        let link = test_path("duplicate-link.img");
+        std::fs::write(&image, b"disk").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&image, &link).unwrap();
+        #[cfg(not(unix))]
+        std::fs::copy(&image, &link).unwrap();
+        #[cfg(unix)]
+        {
+            let duplicate = serde_json::json!({
+                "device": {"serialNumber": "TEST"},
+                "storage": {"luns": [{"imagePath": image}, {"imagePath": link}]}
+            });
+            assert_eq!(parse_configuration(&serde_json::to_vec(&duplicate).unwrap()).unwrap_err().code, ApiErrorCode::DuplicateBackingFile);
+        }
+        let conflict = serde_json::json!({
+            "device": {"serialNumber": "TEST"},
+            "disk": {"enabled": true, "imagePath": image},
+            "storage": {"luns": [{"imagePath": link}]}
+        });
+        assert_eq!(parse_configuration(&serde_json::to_vec(&conflict).unwrap()).unwrap_err().code, ApiErrorCode::InvalidConfig);
+        let _ = std::fs::remove_file(link);
         let _ = std::fs::remove_file(image);
     }
 
