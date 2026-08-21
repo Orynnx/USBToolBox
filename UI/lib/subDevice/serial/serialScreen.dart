@@ -1,0 +1,12 @@
+// ignore_for_file: file_names
+import 'package:flutter/material.dart';
+import '../../l10n/app_localizations.dart';
+import '../devicePage.dart';
+
+class SerialScreen extends StatelessWidget {
+  const SerialScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      EmptyDeviceScreen(title: context.l10n.text('virtualSerial'));
+}
