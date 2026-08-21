@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use log::{debug, info};
+use log::{debug, info, warn};
 
 use crate::usb_sub::usb_recovery::UsbRecoveryState;
 use crate::usb_sub::{UsbError, UsbResult};
@@ -180,8 +180,21 @@ impl UsbGadgetController {
 
     pub fn bind(&self, udc: &str) -> UsbResult<()> {
         validate_component(udc, "UDC")?;
-        write_text(&self.gadget_path().join("UDC"), udc)?;
-        let actual = self.bound_udc()?;
+        let udc_path = self.gadget_path().join("UDC");
+        debug!(
+            "sync_and_bind stage=udc_write path={} value={udc}",
+            udc_path.display()
+        );
+        write_text(&udc_path, udc)
+            .map_err(|error| contextual_error("udc_write", &udc_path, error))?;
+        debug!(
+            "sync_and_bind stage=udc_readback path={}",
+            udc_path.display()
+        );
+        let actual = fs::read_to_string(&udc_path)
+            .map_err(|error| contextual_error("udc_readback", &udc_path, UsbError::Io(error)))?
+            .trim()
+            .to_owned();
         if actual == udc {
             Ok(())
         } else {
@@ -203,11 +216,23 @@ impl UsbGadgetController {
             )));
         }
         let link = self.config_path().join(instance);
-        self.unlink_function(instance)?;
+        self.unlink_function(instance).map_err(|error| {
+            UsbError::Unavailable(format!(
+                "replace_function_link stage=unlink source={} target={} error={error}",
+                function.display(),
+                link.display()
+            ))
+        })?;
 
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&function, &link)?;
+            std::os::unix::fs::symlink(&function, &link).map_err(|error| {
+                UsbError::Unavailable(format!(
+                    "replace_function_link stage=symlink source={} target={} error={error}",
+                    function.display(),
+                    link.display()
+                ))
+            })?;
             Ok(link)
         }
         #[cfg(not(unix))]
@@ -237,8 +262,16 @@ impl UsbGadgetController {
 
     /// 将文件系统缓冲刷新到 backing file，再绑定 UDC。
     pub fn sync_and_bind(&self, udc: &str, timeout: Duration) -> UsbResult<()> {
+        let gadget = self.gadget_path();
+        let udc_path = gadget.join("UDC");
+        info!(
+            "sync_and_bind stage=sync gadget={} udc_path={}",
+            gadget.display(),
+            udc_path.display()
+        );
         #[cfg(unix)]
         unsafe {
+            debug!("sync_and_bind stage=sync");
             libc::sync();
         }
         let deadline = Instant::now() + timeout;
@@ -255,6 +288,19 @@ impl UsbGadgetController {
                 }
                 Err(error) => return Err(error),
             }
+        }
+    }
+
+    /// 记录 UDC bind 前 UVC Function 与 configuration 的 ConfigFS 树。
+    ///
+    /// 诊断失败不得影响正常 USB 状态转换，因此所有读取错误只写日志。
+    pub fn log_uvc_bind_snapshot(&self) {
+        for root in [
+            self.gadget_path().join("functions").join("uvc.hyperusb"),
+            self.config_path(),
+        ] {
+            info!("UDC bind pre-snapshot root={}", root.display());
+            log_tree(&root, 0);
         }
     }
 }
@@ -576,6 +622,57 @@ fn ensure_directory(path: &Path) -> UsbResult<()> {
             "ConfigFS 路径不是目录：{}",
             path.display()
         )))
+    }
+}
+
+fn contextual_error(stage: &str, path: &Path, error: UsbError) -> UsbError {
+    match error {
+        UsbError::Io(io_error) if io_error.raw_os_error() == Some(libc::EBUSY) => {
+            UsbError::Io(io_error)
+        }
+        other => UsbError::Unavailable(format!(
+            "sync_and_bind stage={stage} path={} error={other}",
+            path.display()
+        )),
+    }
+}
+
+fn log_tree(path: &Path, depth: usize) {
+    let indent = "  ".repeat(depth);
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let target = if metadata.file_type().is_symlink() {
+                fs::read_link(path)
+                    .map(|value| format!(" -> {}", value.display()))
+                    .unwrap_or_else(|error| format!(" -> <readlink error: {error}>"))
+            } else {
+                String::new()
+            };
+            info!("UDC bind pre-snapshot {indent}{}{}", path.display(), target);
+            if metadata.is_dir() {
+                match fs::read_dir(path) {
+                    Ok(entries) => {
+                        for entry in entries {
+                            match entry {
+                                Ok(entry) => log_tree(&entry.path(), depth + 1),
+                                Err(error) => warn!(
+                                    "UDC bind pre-snapshot stage=read_dir path={} error={error}",
+                                    path.display()
+                                ),
+                            }
+                        }
+                    }
+                    Err(error) => warn!(
+                        "UDC bind pre-snapshot stage=read_dir path={} error={error}",
+                        path.display()
+                    ),
+                }
+            }
+        }
+        Err(error) => warn!(
+            "UDC bind pre-snapshot stage=symlink_metadata path={} error={error}",
+            path.display()
+        ),
     }
 }
 

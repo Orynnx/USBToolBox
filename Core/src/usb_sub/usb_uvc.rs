@@ -4,8 +4,8 @@
 //! Core 的后续运行时策略决定，不从 JSON 透传 `streaming_*` 参数。
 
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::io::{self, Write};
+use std::path::Path;
 
 use crate::usb_sub::{UsbError, UsbResult, UvcConfig};
 
@@ -23,10 +23,14 @@ impl UsbUvc {
     ) -> UsbResult<()> {
         config.validate()?;
         let function_path = function_path.as_ref();
-        ensure_directory(function_path, "UVC Function")?;
-        clear_function(function_path)?;
-        configure_formats(function_path, config)?;
+        ensure_directory(function_path, "UVC Function")
+            .map_err(|error| stage_error("ensure_function_directory", function_path, error))?;
+        clear_function(function_path)
+            .map_err(|error| stage_error("clear_function", function_path, error))?;
+        configure_formats(function_path, config)
+            .map_err(|error| stage_error("configure_formats", function_path, error))?;
         configure_headers(function_path, config)
+            .map_err(|error| stage_error("configure_headers", function_path, error))
     }
 }
 
@@ -68,36 +72,28 @@ fn configure_headers(function_path: &Path, config: &UvcConfig) -> UsbResult<()> 
     create_configfs_item(&streaming_header, "UVC streaming header item")?;
 
     for format in &config.formats {
-        let target = PathBuf::from("../..")
+        let source = streaming
             .join(format.format.configfs_group())
             .join(format.format.as_str());
-        create_relative_symlink(&target, &streaming_header.join(format.format.as_str()))?;
+        create_configfs_link(&source, &streaming_header.join(format.format.as_str()))?;
     }
-    link_header_to_speeds(
-        &streaming.join("class"),
-        Path::new("../../header/h"),
-        "streaming",
-    )?;
+    link_header_to_speeds(&streaming.join("class"), &streaming_header, "streaming")?;
 
     let control = function_path.join("control");
     let control_header_parent = control.join("header");
     ensure_directory(&control_header_parent, "UVC control header")?;
     let control_header = control_header_parent.join("h");
     create_configfs_item(&control_header, "UVC control header item")?;
-    link_header_to_speeds(
-        &control.join("class"),
-        Path::new("../../header/h"),
-        "control",
-    )?;
+    link_header_to_speeds(&control.join("class"), &control_header, "control")?;
     Ok(())
 }
 
-fn link_header_to_speeds(class_root: &Path, target: &Path, label: &str) -> UsbResult<()> {
+fn link_header_to_speeds(class_root: &Path, source: &Path, label: &str) -> UsbResult<()> {
     let mut linked = 0;
     for speed in SPEEDS {
         let class_path = class_root.join(speed);
         if class_path.is_dir() {
-            create_relative_symlink(target, &class_path.join("h"))?;
+            create_configfs_link(source, &class_path.join("h"))?;
             linked += 1;
         }
     }
@@ -127,7 +123,7 @@ fn clear_function(function_path: &Path) -> UsbResult<()> {
 
 fn ensure_directory(path: &Path, label: &str) -> UsbResult<()> {
     if !path.exists() {
-        fs::create_dir(path)?;
+        fs::create_dir(path).map_err(|error| io_stage("create_directory", path, error))?;
     }
     if path.is_dir() {
         Ok(())
@@ -146,7 +142,7 @@ fn create_configfs_item(path: &Path, label: &str) -> UsbResult<()> {
             path.display()
         )));
     }
-    fs::create_dir(path)?;
+    fs::create_dir(path).map_err(|error| io_stage("create_configfs_item", path, error))?;
     Ok(())
 }
 
@@ -154,10 +150,10 @@ fn remove_class_link(path: &Path) -> UsbResult<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(io_stage("symlink_metadata", path, error)),
     };
     if metadata.file_type().is_symlink() {
-        fs::remove_file(path)?;
+        fs::remove_file(path).map_err(|error| io_stage("remove_class_link", path, error))?;
         return Ok(());
     }
     Err(UsbError::Unavailable(format!(
@@ -170,7 +166,7 @@ fn remove_header_item(path: &Path) -> UsbResult<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(io_stage("symlink_metadata", path, error)),
     };
     if !metadata.is_dir() {
         return Err(UsbError::Unavailable(format!(
@@ -178,18 +174,24 @@ fn remove_header_item(path: &Path) -> UsbResult<()> {
             path.display()
         )));
     }
-    for entry in fs::read_dir(path)? {
-        let child = entry?.path();
-        let metadata = fs::symlink_metadata(&child)?;
+    for entry in
+        fs::read_dir(path).map_err(|error| io_stage("read_header_directory", path, error))?
+    {
+        let child = entry
+            .map_err(|error| io_stage("read_header_entry", path, error))?
+            .path();
+        let metadata = fs::symlink_metadata(&child)
+            .map_err(|error| io_stage("header_child_metadata", &child, error))?;
         if metadata.file_type().is_symlink() {
-            fs::remove_file(child)?;
+            fs::remove_file(&child)
+                .map_err(|error| io_stage("remove_header_link", &child, error))?;
         }
         // ConfigFS attributes such as bcdUVC and dwClockFrequency are ordinary
         // kernel-created files. They are removed together with the item by rmdir.
     }
     // ConfigFS item attributes are kernel-created files. Removing the item with rmdir
     // removes those attributes; they must never be passed to remove_file().
-    fs::remove_dir(path)?;
+    fs::remove_dir(path).map_err(|error| io_stage("remove_header_directory", path, error))?;
     Ok(())
 }
 
@@ -197,38 +199,56 @@ fn remove_format_items(group_path: &Path) -> UsbResult<()> {
     if !group_path.is_dir() {
         return Ok(());
     }
-    for format_entry in fs::read_dir(group_path)? {
-        let format_path = format_entry?.path();
+    for format_entry in fs::read_dir(group_path)
+        .map_err(|error| io_stage("read_format_group", group_path, error))?
+    {
+        let format_path = format_entry
+            .map_err(|error| io_stage("read_format_entry", group_path, error))?
+            .path();
         if !format_path.is_dir() {
             return Err(UsbError::Unavailable(format!(
                 "UVC format group 出现非目录子项，拒绝删除：{}",
                 format_path.display()
             )));
         }
-        for frame_entry in fs::read_dir(&format_path)? {
-            let frame_path = frame_entry?.path();
-            let metadata = fs::symlink_metadata(&frame_path)?;
+        for frame_entry in fs::read_dir(&format_path)
+            .map_err(|error| io_stage("read_format_directory", &format_path, error))?
+        {
+            let frame_path = frame_entry
+                .map_err(|error| io_stage("read_frame_entry", &format_path, error))?
+                .path();
+            let metadata = fs::symlink_metadata(&frame_path)
+                .map_err(|error| io_stage("frame_metadata", &frame_path, error))?;
             if metadata.is_dir() {
                 // Do not enumerate or remove wWidth/dwFrameInterval and other attributes.
-                fs::remove_dir(frame_path)?;
+                fs::remove_dir(&frame_path)
+                    .map_err(|error| io_stage("remove_frame_directory", &frame_path, error))?;
             } else if metadata.file_type().is_symlink() {
                 // A format may also carry an optional ConfigFS descriptor link.
-                fs::remove_file(frame_path)?;
+                fs::remove_file(&frame_path)
+                    .map_err(|error| io_stage("remove_frame_link", &frame_path, error))?;
             }
         }
-        fs::remove_dir(format_path)?;
+        fs::remove_dir(&format_path)
+            .map_err(|error| io_stage("remove_format_directory", &format_path, error))?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn create_relative_symlink(target: &Path, link: &Path) -> UsbResult<()> {
-    std::os::unix::fs::symlink(target, link)?;
+fn create_configfs_link(source: &Path, link: &Path) -> UsbResult<()> {
+    std::os::unix::fs::symlink(source, link).map_err(|error| {
+        UsbError::Unavailable(format!(
+            "UVC stage=create_configfs_link source={} target={} error={error}",
+            source.display(),
+            link.display()
+        ))
+    })?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn create_relative_symlink(_target: &Path, _link: &Path) -> UsbResult<()> {
+fn create_configfs_link(_source: &Path, _link: &Path) -> UsbResult<()> {
     Err(UsbError::Unsupported("UVC ConfigFS 链接仅支持 Unix"))
 }
 
@@ -237,9 +257,28 @@ fn write_attribute<T: std::fmt::Display>(path: &Path, value: T) -> UsbResult<()>
 }
 
 fn write_text(path: &Path, value: &str) -> UsbResult<()> {
-    let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
-    file.write_all(value.as_bytes())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| io_stage("open_attribute", path, error))?;
+    file.write_all(value.as_bytes())
+        .map_err(|error| io_stage("write_attribute", path, error))?;
     Ok(())
+}
+
+fn io_stage(stage: &str, path: &Path, error: io::Error) -> UsbError {
+    UsbError::Unavailable(format!(
+        "UVC stage={stage} path={} error={error}",
+        path.display()
+    ))
+}
+
+fn stage_error(stage: &str, path: &Path, error: UsbError) -> UsbError {
+    UsbError::Unavailable(format!(
+        "UVC stage={stage} path={} error={error}",
+        path.display()
+    ))
 }
 
 fn frame_buffer_size(width: u32, height: u32) -> u32 {

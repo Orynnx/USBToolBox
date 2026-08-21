@@ -93,6 +93,7 @@ impl UsbComposite {
                 self.controller.replace_function_link(STORAGE_INSTANCE)?;
             }
 
+            self.controller.log_uvc_bind_snapshot();
             self.controller.sync_and_bind(udc, bind_timeout)
         })();
 
