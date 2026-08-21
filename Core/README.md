@@ -1,16 +1,17 @@
 # hyperusbd — Android ARM64 USB Gadget Daemon
 
-> **UNTESTED — CDC ACM / UVC**
+> **UNTESTED — CDC ACM / UVC / CDC-NCM**
 >
 > 本版本只完成代码、编译和静态验证，尚未在真实 Android 设备或 USB Host 上验证 CDC ACM
-> 串口通信、UVC 摄像头画面或 Android Camera2 Producer。不要将当前版本标记为硬件验收通过。
+> 串口通信、UVC 摄像头画面、CDC-NCM 网络链路或 Android Camera2 Producer。不要将当前版本标记为硬件验收通过。
 
 `hyperusbd` 是运行在 Android userspace 的 Root AArch64 程序。它通过 ConfigFS 管理一个
-Boot Keyboard + CDC ACM Serial + UVC + Mass Storage Composite Gadget，并在停止或异常恢复时
+Boot Keyboard + CDC ACM Serial + UVC + CDC-NCM + Mass Storage Composite Gadget，并在停止或异常恢复时
 还原 Android USB。
 
-Core 不提供 NKRO、持续按键状态或 NCM；上层只需声明目标配置。Boot Keyboard 仍只提供一次性
-chord，CDC ACM Serial 和 UVC 使用 Linux Gadget 的运行时机制。
+Core 不提供 NKRO、持续按键状态或网络服务；上层只需声明目标配置。Boot Keyboard 仍只提供一次性
+chord，CDC ACM Serial、UVC 和 CDC-NCM 使用 Linux Gadget 的运行时机制。Core 不配置 DHCP、NAT、DNS、
+IP forwarding 或网络共享。
 
 ## 构建
 
@@ -50,6 +51,7 @@ Socket：
 ```sh
 printf 'SET /data/adb/usb_sub/config.json\n' | su -c 'toybox nc -U -q 1 /data/adb/usb_sub/usb.sock'
 printf 'BOOT_KEY CTRL SHIFT ESC\n' | su -c 'toybox nc -U -q 1 /data/adb/usb_sub/usb.sock'
+printf 'NET_STATUS\n' | su -c 'toybox nc -U -q 1 /data/adb/usb_sub/usb.sock'
 ```
 
 完整协议和 JSON字段见 [USB 子设备上层接口](src/usb_sub/docs/API.md)。
@@ -82,7 +84,7 @@ Android及删除 Socket。`SIGKILL` 后再次启动 Daemon会先恢复 Android U
 
 - `UsbTargetState` 表示恢复 Android USB或应用活动 HyperUSB配置。
 - `UsbConfiguration` 只表示活动目标，由 `GadgetIdentity + UsbProfile`组成。
-- `UsbProfile` 包含 `keyboard_enabled`、`serial_enabled`、可选的 UVC 能力描述和
+- `UsbProfile` 包含 `keyboard_enabled`、`serial_enabled`、可选的 UVC/NCM 能力描述和
   `storage_luns`。
 - 相同 `SET` 是无操作；差异 `SET` 失败时先恢复旧配置。
 - 空配置或最终 Function为零的配置会停止 HyperUSB并恢复 Android USB。
@@ -93,6 +95,10 @@ Android及删除 Socket。`SIGKILL` 后再次启动 Daemon会先恢复 Android U
   作为 Gadget 静态配置。
 - 只有显式启用 `uvc.enabled`时才创建 `uvc.hyperusb`；UVC 只根据 `formats[].frames[]`
   声明 MJPEG/YUYV 的分辨率与帧率，不暴露 ConfigFS 带宽参数或视频来源。
+- 只有显式启用 `ncm.enabled`时才创建 `ncm.hyperusb`；MAC、`qmult` 和 `ifname` 遵循 API
+  文档中的缺省规则。Core 只保证 USB Ethernet link 和实际 netdev，不配置 IP 或网络服务。
+- `NET_STATUS` 只返回当前实际 NCM 状态、按设备 MAC 从 `/sys/class/net` 解析的实际 `ifname` 以及两端 MAC；未启动或未启用
+  NCM 时返回 `OK {"enabled":false}`，不返回 `not_started`。
 - Boot Keyboard只提供 Chord Tap：Press → 5 ms → Release。
 - Mass Storage使用持久 `mass_storage.hyperusb` Function；重新配置严格按清空 backing file、
   设置属性、重新挂载的顺序执行。
@@ -123,6 +129,7 @@ src/usb_sub/usb_composite.rs     USB会话、回滚与Android恢复
 src/usb_sub/usb_gadget.rs        ConfigFS与UDC所有权
 src/usb_sub/usb_hid.rs           Boot HID Chord Tap
 src/usb_sub/usb_serial.rs        CDC ACM Function与 /dev/ttyGS<n>解析
+src/usb_sub/usb_ncm.rs           CDC-NCM Function、MAC与ConfigFS属性
 src/usb_sub/usb_uvc.rs           UVC格式/帧描述与ConfigFS链接
 src/usb_sub/uvc_runtime.rs       Producer Socket、UVC状态和2帧背压
 src/usb_sub/uvc_v4l2.rs          Linux/Android UVC事件、Probe/Commit和V4L2输出

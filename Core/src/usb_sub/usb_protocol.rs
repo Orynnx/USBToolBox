@@ -75,11 +75,13 @@ pub type ApiResult<T> = Result<T, ApiError>;
 pub enum ApiRequest {
     Set(PathBuf),
     BootKey(KeyChord),
+    NetStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiResponse {
     Ok,
+    OkJson(String),
     Error(ApiErrorCode),
 }
 
@@ -87,6 +89,7 @@ impl ApiResponse {
     pub fn encode(self) -> String {
         match self {
             Self::Ok => "OK\n".into(),
+            Self::OkJson(json) => format!("OK {json}\n"),
             Self::Error(code) => format!("ERR {}\n", code.as_str()),
         }
     }
@@ -114,6 +117,15 @@ pub fn parse_request(line: &str) -> ApiResult<ApiRequest> {
     }
     if command.eq_ignore_ascii_case("BOOT_KEY") {
         return parse_boot_key(arguments).map(ApiRequest::BootKey);
+    }
+    if command.eq_ignore_ascii_case("NET_STATUS") {
+        if !arguments.is_empty() {
+            return Err(ApiError::new(
+                ApiErrorCode::InvalidCommand,
+                "NET_STATUS 不接受参数",
+            ));
+        }
+        return Ok(ApiRequest::NetStatus);
     }
     Err(ApiError::new(ApiErrorCode::InvalidCommand, "未知命令"))
 }
@@ -295,6 +307,27 @@ mod tests {
         assert_eq!(
             parse_request("STOP").unwrap_err().code,
             ApiErrorCode::InvalidCommand
+        );
+    }
+
+    #[test]
+    fn net_status_is_case_insensitive_and_argument_free() {
+        assert_eq!(parse_request("net_status").unwrap(), ApiRequest::NetStatus);
+        assert_eq!(
+            parse_request("NET_STATUS abc").unwrap_err().code,
+            ApiErrorCode::InvalidCommand
+        );
+        assert_eq!(
+            parse_request("NET_STATUS something").unwrap_err().code,
+            ApiErrorCode::InvalidCommand
+        );
+    }
+
+    #[test]
+    fn json_response_is_single_line() {
+        assert_eq!(
+            ApiResponse::OkJson(r#"{"enabled":false}"#.into()).encode(),
+            "OK {\"enabled\":false}\n"
         );
     }
 

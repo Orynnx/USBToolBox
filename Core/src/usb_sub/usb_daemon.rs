@@ -40,11 +40,12 @@ impl UsbController {
 
     fn execute(&mut self, request: ApiRequest) -> ApiResponse {
         let result = match request {
-            ApiRequest::Set(path) => self.set(&path),
-            ApiRequest::BootKey(chord) => self.boot_key(&chord),
+            ApiRequest::Set(path) => self.set(&path).map(|()| ApiResponse::Ok),
+            ApiRequest::BootKey(chord) => self.boot_key(&chord).map(|()| ApiResponse::Ok),
+            ApiRequest::NetStatus => self.net_status(),
         };
         match result {
-            Ok(()) => ApiResponse::Ok,
+            Ok(response) => response,
             Err(error) => {
                 warn!("API command failed: {error}");
                 ApiResponse::Error(error.code)
@@ -131,6 +132,22 @@ impl UsbController {
             .expect("keyboard writer initialized")
             .send_chord(chord)
             .map_err(internal_error)
+    }
+
+    fn net_status(&self) -> Result<ApiResponse, ApiError> {
+        let status = self
+            .session
+            .as_ref()
+            .map_or_else(crate::usb_sub::NetStatus::disabled, |session| {
+                session.net_status().clone()
+            });
+        let json = status.to_json().map_err(|error| {
+            ApiError::new(
+                ApiErrorCode::InternalError,
+                format!("序列化 NET_STATUS 失败：{error}"),
+            )
+        })?;
+        Ok(ApiResponse::OkJson(json))
     }
 
     fn stop(&mut self) -> Result<(), ApiError> {
@@ -578,6 +595,15 @@ mod platform {
                 BoundedLine::Line(line) => assert_eq!(line, b"boot_key enter"),
                 _ => panic!("expected second line"),
             }
+        }
+
+        #[test]
+        fn net_status_without_session_returns_disabled_json() {
+            let mut controller = UsbController::new(UsbRuntimeConfig::default());
+            assert_eq!(
+                controller.execute(ApiRequest::NetStatus).encode(),
+                "OK {\"enabled\":false}\n"
+            );
         }
 
         #[test]

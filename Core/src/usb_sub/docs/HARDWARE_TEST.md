@@ -2,7 +2,7 @@
 
 > **UNTESTED — 本文是验收清单，不是当前版本的通过报告。**
 >
-> 当前 Core 版本尚未完成真实 Android 设备/USB Host 的 CDC ACM、UVC 画面和 Camera2 Producer
+> 当前 Core 版本尚未完成真实 Android 设备/USB Host 的 CDC ACM、CDC-NCM、UVC 画面和 Camera2 Producer
 > 验证。文末已有的历史记录只覆盖当时版本的 Boot/Storage/Daemon 项目，不能证明本版本的
 > ACM/UVC 已通过实机测试。
 
@@ -115,7 +115,55 @@ HyperUSB 的静态 Gadget 配置。
 - 读取 `port_num` 得到合法的非负整数，并映射到 `/dev/ttyGS<n>`。
 - 将 `serial.enabled` 改为 `false` 后重新 `SET`，串口 Function 链接被移除，Android USB恢复。
 
-## 4. UVC 摄像头
+## 4. CDC-NCM 网络
+
+配置 `/data/adb/usb_sub/ncm.json`：
+
+```json
+{
+  "device": {
+    "manufacturer": "HyperUSB",
+    "product": "HyperUSB NCM",
+    "serialNumber": "HYPERUSB-NCM-0001"
+  },
+  "ncm": {
+    "enabled": true,
+    "deviceMac": "02:48:59:50:45:01",
+    "hostMac": "02:48:59:50:45:02",
+    "qmult": 5,
+    "ifname": "hyperusb%d"
+  }
+}
+```
+
+应用并检查 ConfigFS 属性：
+
+```sh
+printf 'SET /data/adb/usb_sub/ncm.json\n' | su -c 'toybox nc -U -q 1 /data/adb/usb_sub/usb.sock'
+printf 'NET_STATUS\n' | su -c 'toybox nc -U -q 1 /data/adb/usb_sub/usb.sock'
+su -c 'cat /config/usb_gadget/hyperusb/functions/ncm.hyperusb/dev_addr'
+su -c 'cat /config/usb_gadget/hyperusb/functions/ncm.hyperusb/host_addr'
+su -c 'cat /config/usb_gadget/hyperusb/functions/ncm.hyperusb/qmult'
+su -c 'cat /config/usb_gadget/hyperusb/functions/ncm.hyperusb/ifname'
+su -c 'ip link'
+```
+
+验收：
+
+- `ncm.hyperusb` 已链接到 `configs/c.1`，`dev_addr`、`host_addr` 和显式 `qmult` 与配置一致。
+- `NET_STATUS` 返回 `enabled=true`，实际 `ifname` 是按 `deviceMac` 从 `/sys/class/net` 找到的网卡名，
+  不应返回 `hyperusb%d` 模板；`deviceMac`/`hostMac` 与 ConfigFS、Android/Windows 实际值一致；
+  `NET_STATUS abc` 返回 `ERR invalid_command`。
+- `ifname` 在 UDC bind 后通过 MAC 匹配实际 Android netdev，并出现在 `ip link` 中。
+- Windows 设备管理器显示 CDC-NCM/USB Ethernet 适配器且设备状态正常。
+- Core 不配置 DHCP、IP、NAT 或路由；手工给 Android/Windows 设置同一网段地址后，分别验证双向
+  `ping`、TCP 连接和（若环境具备）双向 `iperf3`。
+- `SET empty.json` 后 NCM Function 链接移除、Android USB恢复，Host 网卡消失；再次 `SET ncm.json`
+  时同一 serial 派生的 MAC 保持稳定。
+- `SET empty.json` 后 `NET_STATUS` 返回 `OK {"enabled":false}`；未启动 Session 时查询也应返回同样结果。
+- 先完成 NCM-only，再依次验证 NCM+Boot、NCM+Storage、NCM+UVC 和全组合；确认相同配置不重新枚举。
+
+## 5. UVC 摄像头
 
 配置 `/data/adb/usb_sub/uvc.json`：
 
@@ -167,7 +215,7 @@ printf 'SET /data/adb/usb_sub/uvc.json\n' | su -c 'toybox nc -U -q 1 /data/adb/u
 - 本配置不指定摄像头来源，来源仍由 Producer 决定。
 - 将 `uvc.enabled` 改为 `false` 后重新 `SET`，UVC Function 链接被移除，Android USB恢复。
 
-## 5. 普通磁盘
+## 6. 普通磁盘
 
 创建测试镜像：
 
@@ -212,7 +260,7 @@ fsutil volume dismount E:
 
 5. `SET empty.json`恢复 Android USB后重新 `SET`同一镜像，确认文件内容和 SHA-256不变。
 
-## 6. CD-ROM
+## 7. CD-ROM
 
 配置中设置 `cdrom=true` 并省略 `readOnly`，`SET` 应返回 `OK`，Windows应枚举只读光驱。
 
@@ -232,7 +280,7 @@ ERR invalid_config
 
 当前活动 USB不能断开或重新枚举。
 
-## 7. 校验失败、恢复与安全退出
+## 8. 校验失败、恢复与安全退出
 
 - 对活动会话发送不存在、超大或非法 JSON配置，确认返回稳定错误码且 Host设备保持不变。
 - 在活动状态向 Daemon发送 `SIGTERM`，确认先恢复 Android USB，再删除 `usb.sock`。
@@ -244,7 +292,7 @@ ERR invalid_config
 - `hyperusbd restore`在没有 recovery state时输出 `OK`并以成功状态退出。
 - canonical和 legacy state同时存在时使用 canonical、记录 warning，并在成功后尽力删除 legacy。
 
-## 8. 空配置与宽容协议
+## 9. 空配置与宽容协议
 
 准备内容为 `{}` 的 `/data/adb/usb_sub/empty.json`，执行 `SET`：
 
@@ -257,7 +305,7 @@ ERR invalid_config
 - `boot_key ctrl LCTRL shift a`可以执行，重复 modifier自动去重。
 - `BOOT_KEY NONE A`、缺少普通键、多个普通键和未知键仍返回 `ERR invalid_command`。
 
-## 9. Daemon协议实测记录
+## 10. Daemon协议实测记录
 
 2026-08-20，Android 17 / SDK 37 Root设备与 Windows Host完成本版 Daemon复测：
 

@@ -17,7 +17,10 @@ use crate::usb_sub::usb_model::{UsbConfiguration, UsbProfile, UsbRuntimeConfig, 
 use crate::usb_sub::usb_recovery::UsbRecoveryState;
 use crate::usb_sub::usb_serial::UsbSerial;
 use crate::usb_sub::usb_storage::UsbStorage;
-use crate::usb_sub::{UsbError, UsbResult, UsbUvc, UsbUvcRuntime, UvcConfig, UvcFormatKind};
+use crate::usb_sub::{
+    NetStatus, UsbError, UsbNcm, UsbResult, UsbUvc, UsbUvcRuntime, UvcConfig, UvcFormatKind,
+    NCM_INSTANCE, SYS_NET_PATH,
+};
 
 const HID_INSTANCE: &str = "hid.hyperusb";
 /// 旧版本可能在持久 Gadget 中留下这个链接；新版本只负责解除，不再创建 NKRO。
@@ -51,10 +54,11 @@ impl UsbComposite {
     ) -> UsbResult<()> {
         profile.validate()?;
         info!(
-            "Activating HyperUSB: boot_keyboard={}, serial={}, uvc_formats={}, storage_luns={}, udc={udc}",
+            "Activating HyperUSB: boot_keyboard={}, serial={}, uvc_formats={}, ncm={}, storage_luns={}, udc={udc}",
             profile.keyboard_enabled,
             profile.serial_enabled,
             profile.uvc.as_ref().map_or(0, |uvc| uvc.formats.len()),
+            profile.ncm.is_some(),
             profile.storage_luns.len()
         );
         self.controller.unbind()?;
@@ -65,6 +69,7 @@ impl UsbComposite {
             self.controller.unlink_function(LEGACY_NKRO_INSTANCE)?;
             self.controller.unlink_function(SERIAL_INSTANCE)?;
             self.controller.unlink_function(UVC_INSTANCE)?;
+            self.controller.unlink_function(NCM_INSTANCE)?;
             self.controller.unlink_function(STORAGE_INSTANCE)?;
 
             if profile.keyboard_enabled {
@@ -83,6 +88,12 @@ impl UsbComposite {
                 let path = self.controller.function_path(UVC_INSTANCE)?;
                 UsbUvc.configure_function(path, uvc)?;
                 self.controller.replace_function_link(UVC_INSTANCE)?;
+            }
+
+            if let Some(ncm) = &profile.ncm {
+                let path = self.controller.function_path(NCM_INSTANCE)?;
+                ncm.configure_function(path)?;
+                self.controller.replace_function_link(NCM_INSTANCE)?;
             }
 
             let storage_path = self.controller.function_path(STORAGE_INSTANCE)?;
@@ -122,6 +133,7 @@ impl UsbComposite {
             LEGACY_NKRO_INSTANCE,
             SERIAL_INSTANCE,
             UVC_INSTANCE,
+            NCM_INSTANCE,
             STORAGE_INSTANCE,
         ] {
             if let Err(error) = self.controller.unlink_function(instance) {
@@ -154,6 +166,12 @@ impl UsbComposite {
     pub fn serial_endpoint(&self) -> UsbResult<PathBuf> {
         UsbSerial::endpoint_path(self.controller.function_path(SERIAL_INSTANCE)?)
     }
+
+    pub fn ncm_ifname(&self, ncm: &UsbNcm) -> UsbResult<String> {
+        // ConfigFS 的 ifname 是 hyperusb%d 之类的模板；实际名称由 net core
+        // 分配，必须通过 device MAC 在 sysfs 中反查，不能直接返回模板。
+        ncm.find_interface(SYS_NET_PATH)
+    }
 }
 
 /// 一次从 Android USB 切换到 HyperUSB、再安全恢复的完整会话。
@@ -164,6 +182,7 @@ pub struct UsbSession {
     configuration: UsbConfiguration,
     udc: String,
     uvc_runtime: UsbUvcRuntime,
+    net_status: NetStatus,
     state: UsbRuntimeState,
 }
 
@@ -209,6 +228,28 @@ impl UsbSession {
             };
         }
 
+        let net_status = match Self::resolve_net_status(&composite, &configuration.profile) {
+            Ok(status) => status,
+            Err(error) => {
+                let deactivate = composite.deactivate();
+                let restore = android_lease.restore();
+                return match (deactivate, restore) {
+                    (Ok(()), Ok(())) => Err(error),
+                    (Err(deactivate_error), Ok(())) => Err(UsbError::RestoreFailed(format!(
+                        "读取 NCM Runtime 状态失败：{error}；停用 HyperUSB 失败：{deactivate_error}"
+                    ))),
+                    (Ok(()), Err(restore_error)) => Err(UsbError::RestoreFailed(format!(
+                        "读取 NCM Runtime 状态失败：{error}；恢复 Android USB 也失败：{restore_error}"
+                    ))),
+                    (Err(deactivate_error), Err(restore_error)) => {
+                        Err(UsbError::RestoreFailed(format!(
+                            "读取 NCM Runtime 状态失败：{error}；停用 HyperUSB 失败：{deactivate_error}；恢复 Android USB 也失败：{restore_error}"
+                        )))
+                    }
+                };
+            }
+        };
+
         let uvc_runtime = match UsbUvcRuntime::start(configuration.profile.uvc.as_ref()) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -243,6 +284,7 @@ impl UsbSession {
             keyboard_enabled: configuration.profile.keyboard_enabled,
             serial_enabled: configuration.profile.serial_enabled,
             uvc_enabled: configuration.profile.uvc.is_some(),
+            ncm_enabled: configuration.profile.ncm.is_some(),
             storage_count: configuration.profile.storage_luns.len(),
         };
         Ok(Self {
@@ -252,6 +294,7 @@ impl UsbSession {
             configuration,
             udc,
             uvc_runtime,
+            net_status,
             state,
         })
     }
@@ -328,6 +371,28 @@ impl UsbSession {
                 }
             }
         }
+        let net_status = match Self::resolve_net_status(&self.composite, &configuration.profile) {
+            Ok(status) => status,
+            Err(error) => {
+                match self.composite.activate(
+                    &previous.profile,
+                    &previous.identity,
+                    &self.udc,
+                    self.config.udc_bind_timeout,
+                ) {
+                    Ok(()) => return Err(error),
+                    Err(rollback_error) => {
+                        let stop_error = self.stop_inner().err();
+                        return Err(UsbError::RestoreFailed(format!(
+                            "读取新 NCM Runtime 状态失败：{error}；旧配置恢复失败：{rollback_error}{}",
+                            stop_error
+                                .map(|value| format!("；Android USB 恢复也失败：{value}"))
+                                .unwrap_or_default()
+                        )));
+                    }
+                }
+            }
+        };
         if let Err(error) = self.sync_uvc_runtime(configuration.profile.uvc.as_ref()) {
             let rollback = self.composite.activate(
                 &previous.profile,
@@ -349,8 +414,13 @@ impl UsbSession {
         }
 
         self.configuration = configuration;
+        self.net_status = net_status;
         self.refresh_state();
         Ok(())
+    }
+
+    pub fn net_status(&self) -> &NetStatus {
+        &self.net_status
     }
 
     pub fn set_uvc_streaming(&self, enabled: bool) -> UsbResult<()> {
@@ -367,6 +437,15 @@ impl UsbSession {
         self.uvc_runtime.notify_format(format, width, height, fps)
     }
 
+    fn resolve_net_status(composite: &UsbComposite, profile: &UsbProfile) -> UsbResult<NetStatus> {
+        let Some(ncm) = profile.ncm.as_ref() else {
+            return Ok(NetStatus::disabled());
+        };
+        let ifname = composite.ncm_ifname(ncm)?;
+        info!("CDC-NCM actual interface name: {ifname}");
+        Ok(NetStatus::active(ncm, ifname))
+    }
+
     fn refresh_state(&mut self) {
         self.state = UsbRuntimeState::Active {
             gadget: self.config.gadget_name.clone(),
@@ -374,6 +453,7 @@ impl UsbSession {
             keyboard_enabled: self.configuration.profile.keyboard_enabled,
             serial_enabled: self.configuration.profile.serial_enabled,
             uvc_enabled: self.configuration.profile.uvc.is_some(),
+            ncm_enabled: self.configuration.profile.ncm.is_some(),
             storage_count: self.configuration.profile.storage_luns.len(),
         };
     }
@@ -412,6 +492,7 @@ impl UsbSession {
 
     fn stop_inner(&mut self) -> UsbResult<()> {
         if matches!(self.state, UsbRuntimeState::Stopped) {
+            self.net_status = NetStatus::disabled();
             return Ok(());
         }
 
@@ -423,6 +504,7 @@ impl UsbSession {
         };
         self.android_lease = None;
         self.state = UsbRuntimeState::Stopped;
+        self.net_status = NetStatus::disabled();
 
         info!("HyperUSB session stopped");
 
