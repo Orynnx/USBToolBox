@@ -4,12 +4,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import '../l10n/app_localizations.dart';
-import 'camScreen.dart';
-import 'diskScreen.dart';
-import 'hidScreen.dart';
-import 'netScreen.dart';
-import 'serialScreen.dart';
+import 'cam/camScreen.dart';
+import 'disk/diskScreen.dart';
+import 'hid/hidScreen.dart';
+import 'net/netScreen.dart';
+import 'serial/serialScreen.dart';
 import 'devicePage.dart';
+import '../theme/app_theme.dart';
 
 /// HyperUSB 主控制中心页面
 ///
@@ -36,7 +37,7 @@ class _MainScreenState extends State<MainScreen> {
 
   /// 页面导航辅助方法，推入指定的子设备详情配置页面
   void _open(Widget page) =>
-      Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+      Navigator.of(context).push(AppPageRoute(builder: (_) => page));
 
   @override
   Widget build(BuildContext context) {
@@ -46,7 +47,7 @@ class _MainScreenState extends State<MainScreen> {
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(26, 34, 26, 34),
+          padding: const EdgeInsets.fromLTRB(18, 24, 18, 24),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -140,8 +141,7 @@ class _MainScreenState extends State<MainScreen> {
                 ],
               ),
 
-              // 4. 运行环境与系统信息小节
-              DeviceSection(l.text('environment')), // “环境信息”
+              const SizedBox(height: 10),
               DeviceCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -199,9 +199,6 @@ class _ControllerCard extends StatefulWidget {
 
 class _ControllerCardState extends State<_ControllerCard>
     with SingleTickerProviderStateMixin {
-  static const _stoppedColor = Color(0xffff7373);
-  static const _runningColor = Color(0xffbce7ce);
-
   late final AnimationController _colorController;
 
   @override
@@ -229,79 +226,85 @@ class _ControllerCardState extends State<_ControllerCard>
   }
 
   @override
-  Widget build(BuildContext context) => Card(
-    margin: EdgeInsets.zero,
-    elevation: 0,
-    clipBehavior: Clip.antiAlias,
-    child: AnimatedBuilder(
-      animation: _colorController,
-      builder: (context, child) {
-        final progress = Curves.easeInOutCubic.transform(
-          _colorController.value,
-        );
-        final trailingProgress = ((progress - .18) / .82).clamp(0.0, 1.0);
-        final leading = Color.lerp(_stoppedColor, _runningColor, progress)!;
-        final trailing = Color.lerp(
-          _stoppedColor,
-          _runningColor,
-          trailingProgress,
-        )!;
-        return DecoratedBox(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [leading, trailing],
-            ),
-          ),
-          child: child,
-        );
-      },
-      child: InkWell(
-        onTap: widget.onTap,
-        child: Stack(
-          clipBehavior: Clip.hardEdge,
-          children: [
-            Positioned(
-              // KernelSU StatusCard: BottomEnd plus offset(27dp, 31dp).
-              right: -27,
-              bottom: -31,
-              child: _StatusGlyph(running: widget.running),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 15, 14, 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    widget.running
-                        ? context.l10n.text('running')
-                        : context.l10n.text('stopped'),
-                    style: const TextStyle(
-                      fontSize: 21,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    widget.running
-                        ? context.l10n.text('usbControlled')
-                        : context.l10n.text('usbManaged'),
-                    style: TextStyle(
-                      color: Colors.black.withValues(alpha: .62),
-                      fontSize: 12.5,
-                      height: 1.25,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final stoppedColor = colorScheme.errorContainer;
+    final runningColor = colorScheme.primaryContainer;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 0,
+      clipBehavior: Clip.antiAlias,
+      child: AnimatedBuilder(
+        animation: _colorController,
+        builder: (context, child) {
+          final progress = Curves.easeInOutCubic.transform(
+            _colorController.value,
+          );
+          final trailingProgress = ((progress - .18) / .82).clamp(0.0, 1.0);
+          final leading = Color.lerp(stoppedColor, runningColor, progress)!;
+          final trailing = Color.lerp(
+            stoppedColor,
+            runningColor,
+            trailingProgress,
+          )!;
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [leading, trailing],
               ),
             ),
-          ],
+            child: child,
+          );
+        },
+        child: InkWell(
+          onTap: widget.onTap,
+          child: Stack(
+            clipBehavior: Clip.hardEdge,
+            children: [
+              Positioned(
+                // KernelSU StatusCard: BottomEnd plus offset(27dp, 31dp).
+                right: -27,
+                bottom: -31,
+                child: _StatusGlyph(running: widget.running),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 15, 14, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.running
+                          ? context.l10n.text('running')
+                          : context.l10n.text('stopped'),
+                      style: const TextStyle(
+                        fontSize: 21,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      widget.running
+                          ? context.l10n.text('usbControlled')
+                          : context.l10n.text('usbManaged'),
+                      style: TextStyle(
+                        color: colorScheme.onSurface.withValues(alpha: .68),
+                        fontSize: 12.5,
+                        height: 1.25,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _StatusGlyph extends StatefulWidget {
@@ -360,6 +363,8 @@ class _StatusGlyphState extends State<_StatusGlyph>
       // One continuous AB/BA stage: switch glyph only at the fully transparent
       // midpoint, so there is never a cross-fade overlap.
       final angle = isCrossingToRunning ? -.22 * eased : .22 * (1 - eased);
+      final colorScheme = Theme.of(context).colorScheme;
+
       return Opacity(
         opacity: isCrossingToRunning ? 1 - eased : eased,
         child: Transform.rotate(
@@ -370,8 +375,8 @@ class _StatusGlyphState extends State<_StatusGlyph>
                 ? Icons.check_circle_outline_rounded
                 : Icons.cancel_rounded,
             color: isRunning
-                ? const Color(0xff16784e)
-                : const Color(0xff8d101d),
+                ? colorScheme.primary
+                : colorScheme.error,
             size: 112,
           ),
         ),
@@ -404,62 +409,66 @@ class _DeviceMini extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => DeviceCard(
-    onTap: onTap,
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-    child: Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // 第一行：图标 + 设备标题
-        Row(
-          children: [
-            Icon(icon, size: 17, color: const Color(0xff596a9e)),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return DeviceCard(
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 第一行：图标 + 设备标题
+          Row(
+            children: [
+              Icon(icon, size: 17, color: colorScheme.primary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 5),
-        // 第二行：状态指示圆点 + 激活状态文本
-        Row(
-          children: [
-            Container(
-              width: 6,
-              height: 6,
-              decoration: BoxDecoration(
-                color: active
-                    ? const Color(0xff596a9e) // 激活时为品牌主色
-                    : const Color(0xffb5b5c0), // 未激活为灰色
-                shape: BoxShape.circle,
+            ],
+          ),
+          const SizedBox(height: 5),
+          // 第二行：状态指示圆点 + 激活状态文本
+          Row(
+            children: [
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: active
+                      ? colorScheme.primary
+                      : colorScheme.outlineVariant,
+                  shape: BoxShape.circle,
+                ),
               ),
-            ),
-            const SizedBox(width: 5),
-            Text(
-              active
-                  ? context.l10n.text('enabled') // “已启用”
-                  : context.l10n.text('disabled'), // “已停用”
-              style: TextStyle(
-                fontSize: 11.5,
-                color: active
-                    ? const Color(0xff596a9e)
-                    : const Color(0xff777986),
+              const SizedBox(width: 5),
+              Text(
+                active
+                    ? context.l10n.text('enabled') // “已启用”
+                    : context.l10n.text('disabled'), // “已停用”
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: active
+                      ? colorScheme.primary
+                      : colorScheme.onSurfaceVariant,
+                ),
               ),
-            ),
-          ],
-        ),
-      ],
-    ),
-  );
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// 键值对环境信息行展示组件
@@ -475,21 +484,25 @@ class _InfoLine extends StatelessWidget {
   final String value;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: 13),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          value,
-          style: const TextStyle(color: Color(0xff737581), fontSize: 12.5),
-        ),
-      ],
-    ),
-  );
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 13),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(color: colorScheme.onSurfaceVariant, fontSize: 12.5),
+          ),
+        ],
+      ),
+    );
+  }
 }

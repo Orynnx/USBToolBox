@@ -4,9 +4,6 @@ import 'package:flutter/material.dart';
 
 import '../l10n/app_localizations.dart';
 
-/// 全局默认主色调（淡紫蓝色，用于图标与选中态强调）
-const _primary = Color(0xff596a9e);
-
 /// 子设备详情页面的公共骨架组件（通用脚手架）
 ///
 /// 负责承载子设备配置页面的导航栏（AppBar）、安全区域边距（SafeArea）以及滚动视图（SingleChildScrollView）。
@@ -17,7 +14,7 @@ class DeviceScaffold extends StatelessWidget {
     required this.title,
     required this.child,
     this.action,
-    this.padding = const EdgeInsets.fromLTRB(26, 14, 26, 34),
+    this.padding = const EdgeInsets.fromLTRB(18, 14, 18, 24),
   });
 
   /// 页面顶部导航栏标题
@@ -89,23 +86,26 @@ class DeviceSection extends StatelessWidget {
   final String title;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: 22, bottom: 9),
-    child: Text(
-      title,
-      style: const TextStyle(
-        fontSize: 14,
-        fontWeight: FontWeight.w700,
-        color: Color(0xff717380),
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(top: 22, bottom: 9),
+      child: Text(
+        title,
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w700,
+          color: colorScheme.onSurfaceVariant,
+        ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 /// 设备启停与状态展示卡片组件
 ///
 /// 包含：
-/// 1. 左侧：圆形状态指示图标（启用时呈现浅绿底深绿图标，未启用时为灰色底主色图标）；
+/// 1. 左侧：圆形状态指示图标（启用时呈现主色浅色底深色图标，未启用时为中性底色图标）；
 /// 2. 中间：设备名称及当前运行状态描述（例如“运行中”、“已停用”）；
 /// 3. 右侧：直接控制该子设备启停的 Switch 开关。
 class DeviceStatusCard extends StatelessWidget {
@@ -134,51 +134,62 @@ class DeviceStatusCard extends StatelessWidget {
   final ValueChanged<bool> onChanged;
 
   @override
-  Widget build(BuildContext context) => DeviceCard(
-    child: Row(
-      children: [
-        // 左侧圆形图标状态徽标
-        Container(
-          width: 46,
-          height: 46,
-          decoration: BoxDecoration(
-            color: enabled ? const Color(0xffc4ead6) : const Color(0xffe3e3ec),
-            shape: BoxShape.circle,
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return DeviceCard(
+      child: Row(
+        children: [
+          // 左侧圆形图标状态徽标
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: enabled
+                  ? colorScheme.primaryContainer
+                  : colorScheme.surfaceContainerHighest,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              icon,
+              color: enabled
+                  ? colorScheme.primary
+                  : colorScheme.onSurfaceVariant,
+            ),
           ),
-          child: Icon(
-            icon,
-            color: enabled ? const Color(0xff16784e) : _primary,
-          ),
-        ),
-        const SizedBox(width: 13),
-        // 中间文本描述区域
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
+          const SizedBox(width: 13),
+          // 中间文本描述区域
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 3),
-              Text(
-                detail ??
-                    (enabled
-                        ? context.l10n.text('running')
-                        : context.l10n.text('disabled')),
-                style: const TextStyle(fontSize: 13, color: Color(0xff787a87)),
-              ),
-            ],
+                const SizedBox(height: 3),
+                Text(
+                  detail ??
+                      (enabled
+                          ? context.l10n.text('running')
+                          : context.l10n.text('disabled')),
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-        // 右侧启停 Switch 开关
-        Switch(value: enabled, onChanged: onChanged),
-      ],
-    ),
-  );
+          // 右侧启停 Switch 开关
+          Switch(value: enabled, onChanged: onChanged),
+        ],
+      ),
+    );
+  }
 }
 
 /// 单选/标签胶囊芯片组件
@@ -211,3 +222,14 @@ class ChoicePill extends StatelessWidget {
 
 /// 默认组件间距大小常量
 const double deviceGap = 12;
+
+/// 二级页面的空白起始状态，保留页面标题和返回导航。
+class EmptyDeviceScreen extends StatelessWidget {
+  const EmptyDeviceScreen({super.key, required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) =>
+      DeviceScaffold(title: title, child: const SizedBox.shrink());
+}

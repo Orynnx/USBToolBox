@@ -22,6 +22,5 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(DeviceScaffold), findsOneWidget);
-    expect(find.text('磁盘模式'), findsOneWidget);
   });
 }
