@@ -104,12 +104,12 @@ class SettingsScreen extends StatelessWidget {
                         width: 40,
                         height: 40,
                         decoration: BoxDecoration(
-                          color: colorScheme.secondaryContainer,
+                          color: colorScheme.primaryContainer,
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
                           Icons.memory_outlined,
-                          color: colorScheme.secondary,
+                          color: colorScheme.primary,
                           size: 22,
                         ),
                       ),
@@ -153,12 +153,12 @@ class SettingsScreen extends StatelessWidget {
                         width: 40,
                         height: 40,
                         decoration: BoxDecoration(
-                          color: colorScheme.tertiaryContainer,
+                          color: colorScheme.primaryContainer,
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
                           Icons.info_outline_rounded,
-                          color: colorScheme.tertiary,
+                          color: colorScheme.primary,
                           size: 22,
                         ),
                       ),

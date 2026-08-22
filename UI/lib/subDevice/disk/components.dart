@@ -460,14 +460,12 @@ class DiskDeviceCard extends StatelessWidget {
                     color: colorScheme.error,
                   ),
                 ],
-                const SizedBox(width: 10),
-
-                // 主操作按钮
-                DiskActionButton(
-                  size: 34,
-                  borderRadius: 9,
-                  state: item.state,
-                  onPressed: onToggleState,
+                // 原生 Android Switch 开关（操作中时置灰不可点击）
+                Switch(
+                  value: isRunning,
+                  onChanged: item.state == DiskDeviceState.operating
+                      ? null
+                      : (_) => onToggleState(),
                 ),
               ],
             ),

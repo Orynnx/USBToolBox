@@ -95,10 +95,9 @@ class UvcPowerCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                _UvcThreeStateButton(
-                  running: running,
-                  busy: busy,
-                  onToggle: onToggle,
+                Switch(
+                  value: running,
+                  onChanged: busy ? null : (_) => onToggle(),
                 ),
               ],
             ),
@@ -107,61 +106,6 @@ class UvcPowerCard extends StatelessWidget {
               Text(error!, style: TextStyle(color: colors.error)),
             ],
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _UvcThreeStateButton extends StatelessWidget {
-  const _UvcThreeStateButton({
-    required this.running,
-    required this.busy,
-    required this.onToggle,
-  });
-
-  final bool running;
-  final bool busy;
-  final VoidCallback onToggle;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    final foreground = running ? colors.onPrimary : colors.onSurfaceVariant;
-    return Semantics(
-      button: true,
-      enabled: !busy,
-      label: context.l10n.text(busy ? 'uvcSwitching' : running ? 'stopUvc' : 'startUvc'),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        width: 54,
-        height: 32,
-        decoration: BoxDecoration(
-          color: running ? colors.primary : colors.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(18),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(18),
-            onTap: busy ? null : onToggle,
-            child: Center(
-              child: busy
-                  ? SizedBox(
-                      width: 17,
-                      height: 17,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: colors.primary,
-                      ),
-                    )
-                  : Icon(
-                      running ? Icons.power_settings_new_rounded : Icons.power_off_rounded,
-                      size: 19,
-                      color: foreground,
-                    ),
-            ),
-          ),
         ),
       ),
     );

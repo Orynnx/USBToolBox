@@ -260,7 +260,7 @@ class _DiskScreenState extends State<DiskScreen> {
   void _edit(VirtualDisk disk) {
     if (disk.desiredEnabled) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Stop this disk before editing it.')),
+        SnackBar(content: Text(context.l10n.text('stopDiskBeforeEditing'))),
       );
       return;
     }

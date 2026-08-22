@@ -282,12 +282,6 @@ class KeyboardStatusCard extends StatelessWidget {
         ? l10n.text('keyboardStatusReadySub')
         : l10n.text('keyboardStatusStoppedSub');
 
-    final KeyboardDeviceState state = isOperating
-        ? KeyboardDeviceState.operating
-        : (isEnabled && isReady
-            ? KeyboardDeviceState.running
-            : KeyboardDeviceState.stopped);
-
     return Card(
       elevation: 0,
       color: isEnabled ? greenContainer : colorScheme.surfaceContainerLow,
@@ -353,10 +347,10 @@ class KeyboardStatusCard extends StatelessWidget {
               ),
             ),
 
-            // 三态操作按钮
-            KeyboardActionButton(
-              state: state,
-              onPressed: () => onToggle(!isEnabled),
+            // 原生 Android Switch 开关（操作中时置灰不可点击）
+            Switch(
+              value: isEnabled,
+              onChanged: isOperating ? null : onToggle,
             ),
           ],
         ),
@@ -383,15 +377,6 @@ class KeyboardInputSection extends StatelessWidget {
   final TextEditingController textController;
   final ValueChanged<String> onSendText;
   final VoidCallback onCancelSend;
-
-  static const List<MapEntry<String, String>> _quickCommands = [
-    MapEntry('whoami', 'whoami'),
-    MapEntry('ipconfig', 'ipconfig'),
-    MapEntry('ls -la', 'ls -la'),
-    MapEntry('PowerShell', 'powershell'),
-    MapEntry('cmd', 'cmd.exe'),
-    MapEntry('ping 8.8.8.8', 'ping 8.8.8.8'),
-  ];
 
   @override
   Widget build(BuildContext context) {
@@ -488,53 +473,6 @@ class KeyboardInputSection extends StatelessWidget {
                 ),
                 contentPadding: const EdgeInsets.all(14),
               ),
-            ),
-            const SizedBox(height: 12),
-
-            // 快捷预设命令胶囊
-            Text(
-              l10n.text('keyboardQuickCommandsLabel'),
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w500,
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: _quickCommands.map((cmd) {
-                return InkWell(
-                  borderRadius: BorderRadius.circular(8),
-                  onTap: () {
-                    final current = textController.text;
-                    if (current.isEmpty) {
-                      textController.text = cmd.value;
-                    } else {
-                      textController.text = '$current\n${cmd.value}';
-                    }
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: colorScheme.primary.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      cmd.key,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        color: colorScheme.primary,
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
             ),
             const SizedBox(height: 14),
 
@@ -648,41 +586,39 @@ class TypingIntervalSettingCard extends StatelessWidget {
           children: [
             // 顶行：图标 + 标题 + 当前数值
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Row(
-                  children: [
-                    Icon(
-                      Icons.speed_rounded,
-                      color: colorScheme.primary,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 8),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          l10n.text('keyboardIntervalLabel'),
-                          style: const TextStyle(
-                            fontSize: 14.5,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        Text(
-                          l10n.text('keyboardIntervalSub'),
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
+                Icon(
+                  Icons.speed_rounded,
+                  color: colorScheme.primary,
+                  size: 20,
                 ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        l10n.text('keyboardIntervalLabel'),
+                        style: const TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Text(
+                        l10n.text('keyboardIntervalSub'),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
                 Text(
                   '$intervalMs ms',
                   style: TextStyle(
-                    fontSize: 17,
+                    fontSize: 16.5,
                     fontWeight: FontWeight.bold,
                     color: colorScheme.primary,
                   ),
