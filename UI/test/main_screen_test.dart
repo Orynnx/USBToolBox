@@ -48,7 +48,7 @@ class FakeDiskStorageService extends DiskStorageService {
         readOnly: false,
         removable: true,
         enableFua: true,
-        managedFile: true,
+        ownership: DiskBackingOwnership.managedCopy,
       ),
     ];
   }
@@ -72,18 +72,17 @@ void main() {
         locale: const Locale('zh'),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: MainScreen(
-          client: client,
-          session: session,
-          disks: disks,
-        ),
+        home: MainScreen(client: client, session: session, disks: disks),
       ),
     );
 
     await tester.pumpAndSettle();
 
     // Controller running state
-    expect(find.text('运行中'), findsNWidgets(2)); // Card status + environment info
+    expect(
+      find.text('运行中'),
+      findsNWidgets(2),
+    ); // Card status + environment info
     expect(find.text('HyperUSB 正在控制此 USB 设备'), findsOneWidget);
     expect(find.text('已连接'), findsOneWidget); // Core integration connected
     expect(find.text('已启用'), findsNWidgets(4)); // disk, hid, uvc, serial
@@ -106,11 +105,7 @@ void main() {
         locale: const Locale('zh'),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: MainScreen(
-          client: client,
-          session: session,
-          disks: disks,
-        ),
+        home: MainScreen(client: client, session: session, disks: disks),
       ),
     );
 

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use log::{error, warn};
 
-use crate::usb_sub::usb_config::load_configuration;
+use crate::usb_sub::usb_config::{load_configuration, probe_image};
 use crate::usb_sub::usb_protocol::{ApiError, ApiErrorCode, ApiRequest, ApiResponse};
 use crate::usb_sub::{
     HidKeyboardWriter, UsbConfiguration, UsbError, UsbRuntimeConfig, UsbRuntimeState, UsbSession,
@@ -47,6 +47,7 @@ impl UsbController {
         }
         let result = match request {
             ApiRequest::Set(path) => self.set(&path).map(|()| ApiResponse::Ok),
+            ApiRequest::ProbeImage(path) => Self::probe_image(&path),
             ApiRequest::BootKey(chord) => self.boot_key(&chord).map(|()| ApiResponse::Ok),
             ApiRequest::NetStatus => self.net_status(),
             ApiRequest::Ping | ApiRequest::Status => unreachable!("handled above"),
@@ -87,6 +88,16 @@ impl UsbController {
     fn set(&mut self, path: &Path) -> Result<(), ApiError> {
         let target = load_configuration(path)?;
         self.apply(target)
+    }
+
+    fn probe_image(path: &Path) -> Result<ApiResponse, ApiError> {
+        let probe = probe_image(path)?;
+        let json = serde_json::json!({
+            "path": probe.path.to_string_lossy(),
+            "sizeBytes": probe.size_bytes,
+        })
+        .to_string();
+        Ok(ApiResponse::OkJson(json))
     }
 
     fn apply(&mut self, target: UsbTargetState) -> Result<(), ApiError> {

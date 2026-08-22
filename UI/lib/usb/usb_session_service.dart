@@ -11,7 +11,7 @@ class UsbSessionService {
   final RootShellService _root;
   final CoreDeploymentService _deployment;
   final CoreClient _client;
-  Future<void> _tail = Future.value();
+  static Future<void> _globalTail = Future.value();
 
   static final instance = UsbSessionService(
     RootShellService(),
@@ -20,8 +20,8 @@ class UsbSessionService {
   );
 
   Future<T> _serial<T>(Future<T> Function() work) {
-    final result = _tail.then((_) => work());
-    _tail = result.then<void>((_) {}, onError: (_, _) {});
+    final result = _globalTail.then((_) => work());
+    _globalTail = result.then<void>((_) {}, onError: (_, _) {});
     return result;
   }
 
@@ -66,7 +66,8 @@ class UsbSessionService {
       await prefs.setBool('hyperusb.serial.enabled', serialEnabled);
     }
     final keyboardEnabledValue =
-        keyboardEnabled ?? (prefs.getBool('hyperusb.keyboard.enabled') ?? false);
+        keyboardEnabled ??
+        (prefs.getBool('hyperusb.keyboard.enabled') ?? false);
     if (keyboardEnabled != null) {
       await prefs.setBool('hyperusb.keyboard.enabled', keyboardEnabled);
     }
@@ -77,30 +78,50 @@ class UsbSessionService {
     }
     final uvcJson = uvcEnabled == false
         ? null
-        : uvc?.toJson() ?? _readUvcConfig(prefs.getString('hyperusb.uvc.config'));
-    final config = <String, dynamic>{
-      'device': {
-        'manufacturer': 'HyperUSB',
-        'product': 'HyperUSB Composite',
-        'serialNumber': serial,
-      },
-      'storage': {
-        'luns': active
-            .map(
-              (disk) => {
-                'imagePath': disk.imagePath,
-                'readOnly': disk.type == VirtualDiskType.cdrom || disk.readOnly,
-                'removable': disk.removable,
-                'cdrom': disk.type == VirtualDiskType.cdrom,
-                'noFua': !disk.enableFua,
-              },
-            )
-            .toList(),
-      },
-      'serial': {'enabled': serialEnabledValue},
-      'keyboard': {'boot': keyboardEnabledValue},
-      'uvc': uvcJson ?? {'enabled': false},
-    };
+        : uvc?.toJson() ??
+              _readUvcConfig(prefs.getString('hyperusb.uvc.config'));
+    final config = await _readManagerConfig();
+    final device = _section(config, 'device');
+    device.putIfAbsent('manufacturer', () => 'HyperUSB');
+    device.putIfAbsent('product', () => 'HyperUSB Composite');
+    device.putIfAbsent('serialNumber', () => serial);
+    config['device'] = device;
+
+    final storage = _section(config, 'storage');
+    storage['luns'] = active
+        .map(
+          (disk) => {
+            'imagePath': disk.imagePath,
+            'readOnly': disk.type == VirtualDiskType.cdrom || disk.readOnly,
+            'removable': disk.removable,
+            'cdrom': disk.type == VirtualDiskType.cdrom,
+            'noFua': !disk.enableFua,
+          },
+        )
+        .toList();
+    config['storage'] = storage;
+
+    final serialSection = _section(config, 'serial');
+    if (serialEnabled != null || !serialSection.containsKey('enabled')) {
+      serialSection['enabled'] = serialEnabledValue;
+    }
+    config['serial'] = serialSection;
+
+    final keyboardSection = _section(config, 'keyboard');
+    if (keyboardEnabled != null || !keyboardSection.containsKey('boot')) {
+      keyboardSection['boot'] = keyboardEnabledValue;
+    }
+    config['keyboard'] = keyboardSection;
+
+    if (uvcEnabled == false) {
+      final uvcSection = _section(config, 'uvc');
+      uvcSection['enabled'] = false;
+      config['uvc'] = uvcSection;
+    } else if (uvc != null) {
+      config['uvc'] = uvc.toJson();
+    } else if (!config.containsKey('uvc')) {
+      config['uvc'] = uvcJson ?? {'enabled': false};
+    }
     final json = jsonEncode(config);
     const path = '/data/adb/usb_sub/manager_config.json';
     final temp = '$path.new';
@@ -110,6 +131,30 @@ class UsbSessionService {
     await _client.setConfig(path);
     return _client.getStatus();
   });
+
+  Future<Map<String, dynamic>> _readManagerConfig() async {
+    const path = '/data/adb/usb_sub/manager_config.json';
+    final quoted = RootShellService.shellQuote(path);
+    final raw = await _root.runRootCommand(
+      'if [ -f $quoted ]; then cat $quoted; else printf %s ${RootShellService.shellQuote('{}')}; fi',
+    );
+    if (raw.trim().isEmpty) return <String, dynamic>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    throw CoreException(
+      CoreErrorCode.invalidConfig,
+      'The current Manager configuration is not valid JSON.',
+    );
+  }
+
+  Map<String, dynamic> _section(Map<String, dynamic> config, String key) {
+    final value = config[key];
+    return value is Map
+        ? Map<String, dynamic>.from(value)
+        : <String, dynamic>{};
+  }
 
   Map<String, dynamic>? _readUvcConfig(String? value) {
     if (value == null) return null;

@@ -5,22 +5,30 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.os.StatFs
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.EventChannel
 import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : FlutterActivity() {
     private val documentsChannel = "org.orynnx.hyperusb/documents"
+    private val documentEventsChannel = "org.orynnx.hyperusb/document_events"
     private val uvcChannel = "org.orynnx.hyperusb/uvc"
     private val cameraPermissionRequest = 4201
     private val screenCaptureRequest = 4202
     private val ioExecutor = Executors.newSingleThreadExecutor()
+    private val copyCancellation = ConcurrentHashMap<String, AtomicBoolean>()
+    private var documentEventSink: EventChannel.EventSink? = null
     private var pendingPicker: MethodChannel.Result? = null
     private var pendingCameraPermission: MethodChannel.Result? = null
     private var pendingScreenCapture: MethodChannel.Result? = null
@@ -31,6 +39,16 @@ class MainActivity : FlutterActivity() {
         uvcProducer = UvcProducerController(this)
         MethodChannel(engine.dartExecutor.binaryMessenger, documentsChannel)
             .setMethodCallHandler(::handleDocumentCall)
+        EventChannel(engine.dartExecutor.binaryMessenger, documentEventsChannel)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    documentEventSink = events
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    documentEventSink = null
+                }
+            })
         MethodChannel(engine.dartExecutor.binaryMessenger, uvcChannel)
             .setMethodCallHandler(::handleUvcCall)
     }
@@ -91,6 +109,7 @@ class MainActivity : FlutterActivity() {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type = "application/octet-stream"
                     putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/octet-stream", "application/x-iso9660-image", "*/*"))
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
                 },
                 4101,
                 result,
@@ -99,13 +118,29 @@ class MainActivity : FlutterActivity() {
                 Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
                     type = "video/*"
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
                 },
                 4103,
                 result,
             )
-            "pickDirectory" -> openPicker(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), 4102, result)
+            "pickDirectory" -> openPicker(
+                Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                    addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                            Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+                    )
+                },
+                4102,
+                result,
+            )
             "createSparse" -> runIo(result) { createSparse(call) }
             "copyDocument" -> runIo(result) { copyDocument(call) }
+            "cancelCopy" -> {
+                val operationId = requiredString(call, "operationId")
+                result.success(copyCancellation[operationId]?.let { it.set(true); true } ?: false)
+            }
             "deleteDocument" -> runIo(result) {
                 val uri = requiredUri(call, "uri")
                 check(DocumentsContract.deleteDocument(contentResolver, uri)) { "The document provider refused deletion" }
@@ -129,6 +164,8 @@ class MainActivity : FlutterActivity() {
             try {
                 val value = work()
                 runOnUiThread { result.success(value) }
+            } catch (error: DocumentOperationException) {
+                runOnUiThread { result.error(error.code, error.message, null) }
             } catch (error: Exception) {
                 runOnUiThread { result.error("document_io_failed", error.message ?: error.javaClass.simpleName, null) }
             }
@@ -163,29 +200,57 @@ class MainActivity : FlutterActivity() {
         val sourceUri = requiredUri(call, "sourceUri")
         val treeUri = requiredUri(call, "treeUri")
         val directoryPath = requiredString(call, "directoryPath").trimEnd('/')
+        val operationId = requiredString(call, "operationId")
+        val cancelled = AtomicBoolean(false)
+        check(copyCancellation.putIfAbsent(operationId, cancelled) == null) { "Duplicate copy operation" }
         val requestedName = queryDisplayName(sourceUri) ?: error("Unable to determine source filename")
         val mimeType = contentResolver.getType(sourceUri) ?: "application/octet-stream"
-        val targetUri = createDocument(treeUri, requestedName, mimeType)
+        val total = querySize(sourceUri)
+        val available = StatFs(directoryPath).availableBytes
+        if (total > 0 && total > available) {
+            copyCancellation.remove(operationId)
+            throw DocumentOperationException("insufficient_space", "Not enough free space in the selected directory")
+        }
+        var targetUri: Uri? = null
         var copied = 0L
         try {
+            val createdUri = createDocument(treeUri, requestedName, mimeType)
+            targetUri = createdUri
+            emitCopyProgress(operationId, copied, total)
             contentResolver.openInputStream(sourceUri)?.use { input ->
-                contentResolver.openOutputStream(targetUri, "w")?.use { output ->
+                contentResolver.openOutputStream(createdUri, "w")?.use { output ->
                     val buffer = ByteArray(1024 * 1024)
                     while (true) {
+                        if (cancelled.get()) {
+                            throw DocumentOperationException("copy_cancelled", "Copy cancelled")
+                        }
                         val count = input.read(buffer)
                         if (count < 0) break
                         output.write(buffer, 0, count)
                         copied += count
+                        emitCopyProgress(operationId, copied, total)
                     }
                     output.flush()
                 } ?: error("Unable to open destination file")
             } ?: error("Unable to open source file")
         } catch (error: Exception) {
-            DocumentsContract.deleteDocument(contentResolver, targetUri)
+            targetUri?.let { runCatching { DocumentsContract.deleteDocument(contentResolver, it) } }
             throw error
+        } finally {
+            copyCancellation.remove(operationId)
         }
-        val actualName = queryDisplayName(targetUri) ?: requestedName
-        return documentResult(targetUri, "$directoryPath/$actualName", actualName, copied)
+        val completedUri = checkNotNull(targetUri)
+        val actualName = queryDisplayName(completedUri) ?: requestedName
+        emitCopyProgress(operationId, copied, if (total > 0) total else copied)
+        return documentResult(completedUri, "$directoryPath/$actualName", actualName, copied)
+    }
+
+    private fun emitCopyProgress(operationId: String, copied: Long, total: Long) {
+        runOnUiThread {
+            documentEventSink?.success(
+                mapOf("operationId" to operationId, "copiedBytes" to copied, "totalBytes" to total),
+            )
+        }
     }
 
     private fun createDocument(treeUri: Uri, name: String, mimeType: String): Uri {
@@ -251,8 +316,14 @@ class MainActivity : FlutterActivity() {
         try {
             contentResolver.takePersistableUriPermission(uri, grantedFlags)
         } catch (error: SecurityException) {
-            result.error("permission_failed", error.message, null)
-            return
+            // Xiaomi FileExplorer can return a temporary FileProvider grant
+            // even for ACTION_OPEN_DOCUMENT. A direct, Core-verified shared-
+            // storage path does not depend on persisting that URI grant. Tree
+            // selections still require persistence for later managed deletes.
+            if (requestCode == 4102) {
+                result.error("permission_failed", error.message, null)
+                return
+            }
         }
 
         if (requestCode == 4101 || requestCode == 4103) {
@@ -260,7 +331,13 @@ class MainActivity : FlutterActivity() {
             if (name == null) {
                 result.error("invalid_document", "Unable to determine the selected filename", null)
             } else {
-                result.success(mapOf("uri" to uri.toString(), "name" to name, "size" to querySize(uri)))
+                val value = mutableMapOf<String, Any>(
+                    "uri" to uri.toString(),
+                    "name" to name,
+                    "size" to querySize(uri),
+                )
+                resolvePrimaryStoragePath(uri)?.let { value["directPath"] = it }
+                result.success(value)
             }
             return
         }
@@ -274,6 +351,17 @@ class MainActivity : FlutterActivity() {
         val path = if (relative.isEmpty()) "/storage/emulated/0" else "/storage/emulated/0/$relative"
         result.success(mapOf("uri" to uri.toString(), "path" to path))
     }
+
+    private fun resolvePrimaryStoragePath(uri: Uri): String? {
+        PrimaryStoragePathResolver.resolveXiaomiFileProvider(uri.authority, uri.pathSegments)?.let {
+            return it
+        }
+        if (!DocumentsContract.isDocumentUri(this, uri)) return null
+        val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull() ?: return null
+        return PrimaryStoragePathResolver.resolve(uri.authority, documentId)
+    }
+
+    private class DocumentOperationException(val code: String, message: String) : IOException(message)
 
     override fun onRequestPermissionsResult(
         requestCode: Int,

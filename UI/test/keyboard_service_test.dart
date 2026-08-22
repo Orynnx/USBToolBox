@@ -43,7 +43,7 @@ class FakeDiskStorageService extends DiskStorageService {
         readOnly: false,
         removable: true,
         enableFua: true,
-        managedFile: true,
+        ownership: DiskBackingOwnership.managedCopy,
       ),
     ];
   }
@@ -86,18 +86,23 @@ void main() {
       );
     });
 
-    test('enable() ensures deployment and applies keyboard.boot=true preserving disks', () async {
-      await service.enable();
+    test(
+      'enable() ensures deployment and applies keyboard.boot=true preserving disks',
+      () async {
+        await service.enable();
 
-      expect(fakeDeployment.readyEnsured, isTrue);
-      expect(service.currentStatus.enabled, isTrue);
-      expect(service.currentStatus.ready, isTrue);
+        expect(fakeDeployment.readyEnsured, isTrue);
+        expect(service.currentStatus.enabled, isTrue);
+        expect(service.currentStatus.ready, isTrue);
 
-      final hasConfigWithKeyboardBoot = fakeRoot.executedCommands.any(
-        (cmd) => cmd.contains('"keyboard":{"boot":true}') && cmd.contains('"luns":[{"imagePath":"/data/local/tmp/test.img"'),
-      );
-      expect(hasConfigWithKeyboardBoot, isTrue);
-    });
+        final hasConfigWithKeyboardBoot = fakeRoot.executedCommands.any(
+          (cmd) =>
+              cmd.contains('"keyboard":{"boot":true}') &&
+              cmd.contains('"luns":[{"imagePath":"/data/local/tmp/test.img"'),
+        );
+        expect(hasConfigWithKeyboardBoot, isTrue);
+      },
+    );
 
     test('sendKey(A) issues BOOT_KEY A', () async {
       await service.sendKey('A');
@@ -126,14 +131,17 @@ void main() {
       expect(hasBootKeyAltF4, isTrue);
     });
 
-    test('sendShortcut(CTRL, SHIFT, ESC) issues single BOOT_KEY CTRL SHIFT ESC', () async {
-      await service.sendShortcut(['CTRL', 'SHIFT'], 'ESC');
+    test(
+      'sendShortcut(CTRL, SHIFT, ESC) issues single BOOT_KEY CTRL SHIFT ESC',
+      () async {
+        await service.sendShortcut(['CTRL', 'SHIFT'], 'ESC');
 
-      final hasBootKeyCtrlShiftEsc = fakeRoot.executedCommands.any(
-        (cmd) => cmd.contains('BOOT_KEY CTRL SHIFT ESC'),
-      );
-      expect(hasBootKeyCtrlShiftEsc, isTrue);
-    });
+        final hasBootKeyCtrlShiftEsc = fakeRoot.executedCommands.any(
+          (cmd) => cmd.contains('BOOT_KEY CTRL SHIFT ESC'),
+        );
+        expect(hasBootKeyCtrlShiftEsc, isTrue);
+      },
+    );
 
     test('typeText(Ab1!) sends strokes sequentially in order', () async {
       await service.typeText('Ab1!', intervalMs: 1);
@@ -149,9 +157,12 @@ void main() {
       expect(bootKeyCommands[3], contains('BOOT_KEY SHIFT 1'));
     });
 
-    test('cancelTyping stops pending keystrokes immediately without dummy releases', () async {
-      service.cancelTyping();
-      expect(service.currentStatus.isSending, isFalse);
-    });
+    test(
+      'cancelTyping stops pending keystrokes immediately without dummy releases',
+      () async {
+        service.cancelTyping();
+        expect(service.currentStatus.isSending, isFalse);
+      },
+    );
   });
 }

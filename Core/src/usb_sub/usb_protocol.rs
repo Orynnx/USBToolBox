@@ -76,6 +76,7 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiRequest {
     Set(PathBuf),
+    ProbeImage(PathBuf),
     Ping,
     Status,
     BootKey(KeyChord),
@@ -118,6 +119,16 @@ pub fn parse_request(line: &str) -> ApiResult<ApiRequest> {
             ));
         }
         return Ok(ApiRequest::Set(PathBuf::from(path)));
+    }
+    if command.eq_ignore_ascii_case("PROBE_IMAGE") {
+        let path = arguments;
+        if path.is_empty() || !path.starts_with('/') {
+            return Err(ApiError::new(
+                ApiErrorCode::InvalidConfigPath,
+                "PROBE_IMAGE 需要非空绝对镜像路径",
+            ));
+        }
+        return Ok(ApiRequest::ProbeImage(PathBuf::from(path)));
     }
     if command.eq_ignore_ascii_case("PING") && arguments.is_empty() {
         return Ok(ApiRequest::Ping);
@@ -300,6 +311,18 @@ mod tests {
         assert_eq!(
             parse_request("  set\t /data/config.json  ").unwrap(),
             ApiRequest::Set(PathBuf::from("/data/config.json"))
+        );
+    }
+
+    #[test]
+    fn probe_image_preserves_spaces_and_requires_an_absolute_path() {
+        assert_eq!(
+            parse_request("PROBE_IMAGE /storage/emulated/0/My Images/boot.iso").unwrap(),
+            ApiRequest::ProbeImage(PathBuf::from("/storage/emulated/0/My Images/boot.iso"))
+        );
+        assert_eq!(
+            parse_request("PROBE_IMAGE relative.img").unwrap_err().code,
+            ApiErrorCode::InvalidConfigPath
         );
     }
 

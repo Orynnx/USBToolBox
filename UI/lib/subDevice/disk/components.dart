@@ -8,7 +8,7 @@ import '../../../storage/services/document_picker_service.dart';
 enum DiskDeviceType { usb, cdrom }
 
 /// 磁盘设备运行状态
-enum DiskDeviceState { stopped, operating, running }
+enum DiskDeviceState { stopped, operating, running, unavailable }
 
 /// 磁盘访问模式
 enum DiskAccessMode { readOnly, readWrite }
@@ -174,6 +174,20 @@ class DiskActionButton extends StatelessWidget {
             color: colorScheme.onErrorContainer,
             borderRadius: BorderRadius.circular(2.0),
           ),
+        );
+        break;
+
+      case DiskDeviceState.unavailable:
+        bgColor = colorScheme.errorContainer;
+        border = Border.all(
+          color: colorScheme.error.withValues(alpha: 0.35),
+          width: 1.2,
+        );
+        iconWidget = Icon(
+          Icons.error_outline_rounded,
+          key: const ValueKey('icon_unavailable'),
+          color: colorScheme.error,
+          size: size * 0.56,
         );
         break;
     }
@@ -482,10 +496,12 @@ class DiskActionButtons extends StatelessWidget {
     super.key,
     required this.onImport,
     required this.onCreate,
+    this.importing = false,
   });
 
   final VoidCallback onImport;
   final VoidCallback onCreate;
+  final bool importing;
 
   @override
   Widget build(BuildContext context) {
@@ -499,8 +515,13 @@ class DiskActionButtons extends StatelessWidget {
           child: SizedBox(
             height: 46,
             child: OutlinedButton.icon(
-              onPressed: onImport,
-              icon: const Icon(Icons.file_open_outlined, size: 18),
+              onPressed: importing ? null : onImport,
+              icon: importing
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.file_open_outlined, size: 18),
               label: Text(
                 l10n.text('importImage'),
                 style: const TextStyle(
@@ -1269,6 +1290,11 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
 
   void _onPathChanged() {
     setState(() {
+      final selectedPath = _source?.directPath ?? _source?.uri;
+      if (_source != null && _pathController.text != selectedPath) {
+        _source = null;
+        _destination = null;
+      }
       if (_pathError != null) {
         _validatePath();
       }
@@ -1303,6 +1329,11 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
     if (!hasSupportedExt) {
       _pathError = l10n.text('fileNotSupported');
       return false;
+    }
+
+    if (widget.isImport && _source != null) {
+      _pathError = null;
+      return true;
     }
 
     // 检查路径合法性
@@ -1372,7 +1403,6 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
                   Expanded(
                     child: TextField(
                       controller: _pathController,
-                      readOnly: widget.isImport,
                       decoration: InputDecoration(
                         labelText: l10n.text('filePath'),
                         hintText: l10n.text('filePathHint'),
@@ -1396,16 +1426,16 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
                       onTap: () async {
                         final source = await DocumentPickerService.pickFile();
                         if (source == null || !mounted) return;
-                        final destination =
-                            await DocumentPickerService.pickDirectory();
-                        if (destination == null || !mounted) return;
-                        _source = source;
-                        _destination = destination;
-                        _pathController.text =
-                            '${destination.path}/${source.name}';
-                        if (_nameController.text.trim().isEmpty) {
-                          _nameController.text = source.name;
-                        }
+                        setState(() {
+                          _source = source;
+                          _destination = null;
+                          _pathController.text =
+                              source.directPath ?? source.uri;
+                          if (_nameController.text.trim().isEmpty) {
+                            _nameController.text = source.name;
+                          }
+                          _validatePath();
+                        });
                       },
                       child: Container(
                         width: 54,
@@ -1600,8 +1630,8 @@ class _DiskEditBottomSheetState extends State<DiskEditBottomSheet> {
                         sourceUri: _source?.uri,
                         sourceSize: _source?.size,
                       );
-                      widget.onSave(updated);
                       Navigator.of(context).pop();
+                      Future<void>.sync(() => widget.onSave(updated));
                     },
                     style: FilledButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 14),
@@ -1686,21 +1716,18 @@ class _DiskDeleteBottomSheetState extends State<DiskDeleteBottomSheet> {
                 .replaceAll('%s', widget.diskName),
             style: TextStyle(color: colors.onSurfaceVariant),
           ),
-          const SizedBox(height: 12),
-          CheckboxListTile(
-            value: _deleteImageFile,
-            onChanged: widget.canDeleteImageFile
-                ? (value) => setState(() => _deleteImageFile = value ?? false)
-                : null,
-            contentPadding: EdgeInsets.zero,
-            controlAffinity: ListTileControlAffinity.leading,
-            title: Text(context.l10n.text('deleteImageFile')),
-            subtitle: Text(
-              widget.canDeleteImageFile
-                  ? context.l10n.text('deleteImageFileDescription')
-                  : context.l10n.text('deleteImageUnavailable'),
+          if (widget.canDeleteImageFile) ...[
+            const SizedBox(height: 12),
+            CheckboxListTile(
+              value: _deleteImageFile,
+              onChanged: (value) =>
+                  setState(() => _deleteImageFile = value ?? false),
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: Text(context.l10n.text('deleteImageFile')),
+              subtitle: Text(context.l10n.text('deleteImageFileDescription')),
             ),
-          ),
+          ],
           const SizedBox(height: 16),
           Row(
             children: [

@@ -1,5 +1,7 @@
 enum VirtualDiskType { disk, cdrom }
 
+enum DiskBackingOwnership { linked, managedCopy, managedNew }
+
 class VirtualDisk {
   const VirtualDisk({
     required this.id,
@@ -10,15 +12,27 @@ class VirtualDisk {
     required this.removable,
     required this.enableFua,
     required this.desiredEnabled,
-    required this.managedFile,
+    required this.ownership,
     required this.sizeBytes,
-    this.documentUri,
+    this.sourceUri,
+    this.managedDocumentUri,
   });
+
   final String id, name, imagePath;
   final VirtualDiskType type;
-  final bool readOnly, removable, enableFua, desiredEnabled, managedFile;
+  final bool readOnly, removable, enableFua, desiredEnabled;
+  final DiskBackingOwnership ownership;
   final int sizeBytes;
-  final String? documentUri;
+
+  /// Persisted read grant for a user-owned source. Never delete this URI.
+  final String? sourceUri;
+
+  /// URI of a file created by HyperUSB. Only this URI may be deleted.
+  final String? managedDocumentUri;
+
+  bool get canDeleteBacking =>
+      ownership != DiskBackingOwnership.linked && managedDocumentUri != null;
+
   VirtualDisk copyWith({
     String? name,
     String? imagePath,
@@ -27,9 +41,10 @@ class VirtualDisk {
     bool? removable,
     bool? enableFua,
     bool? desiredEnabled,
-    bool? managedFile,
+    DiskBackingOwnership? ownership,
     int? sizeBytes,
-    String? documentUri,
+    String? sourceUri,
+    String? managedDocumentUri,
   }) => VirtualDisk(
     id: id,
     name: name ?? this.name,
@@ -39,11 +54,14 @@ class VirtualDisk {
     removable: removable ?? this.removable,
     enableFua: enableFua ?? this.enableFua,
     desiredEnabled: desiredEnabled ?? this.desiredEnabled,
-    managedFile: managedFile ?? this.managedFile,
+    ownership: ownership ?? this.ownership,
     sizeBytes: sizeBytes ?? this.sizeBytes,
-    documentUri: documentUri ?? this.documentUri,
+    sourceUri: sourceUri ?? this.sourceUri,
+    managedDocumentUri: managedDocumentUri ?? this.managedDocumentUri,
   );
+
   Map<String, dynamic> toJson() => {
+    'schemaVersion': 2,
     'id': id,
     'name': name,
     'imagePath': imagePath,
@@ -52,23 +70,40 @@ class VirtualDisk {
     'removable': removable,
     'enableFua': enableFua,
     'desiredEnabled': desiredEnabled,
-    'managedFile': managedFile,
+    'ownership': ownership.name,
     'sizeBytes': sizeBytes,
-    'documentUri': documentUri,
+    'sourceUri': sourceUri,
+    'managedDocumentUri': managedDocumentUri,
   };
-  factory VirtualDisk.fromJson(Map<String, dynamic> json) => VirtualDisk(
-    id: json['id'] as String,
-    name: json['name'] as String,
-    imagePath: json['imagePath'] as String,
-    type: json['type'] == 'cdrom'
-        ? VirtualDiskType.cdrom
-        : VirtualDiskType.disk,
-    readOnly: json['readOnly'] == true,
-    removable: json['removable'] != false,
-    enableFua: json['enableFua'] == true,
-    desiredEnabled: json['desiredEnabled'] == true,
-    managedFile: json['managedFile'] == true,
-    sizeBytes: (json['sizeBytes'] as num?)?.toInt() ?? 0,
-    documentUri: json['documentUri'] as String?,
-  );
+
+  factory VirtualDisk.fromJson(Map<String, dynamic> json) {
+    final legacyManaged = json['managedFile'] == true;
+    final ownership = DiskBackingOwnership.values.firstWhere(
+      (value) => value.name == json['ownership'],
+      orElse: () => legacyManaged
+          ? DiskBackingOwnership.managedCopy
+          : DiskBackingOwnership.linked,
+    );
+    final legacyDocumentUri = json['documentUri'] as String?;
+    return VirtualDisk(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      imagePath: json['imagePath'] as String,
+      type: json['type'] == 'cdrom'
+          ? VirtualDiskType.cdrom
+          : VirtualDiskType.disk,
+      readOnly: json['readOnly'] == true,
+      removable: json['removable'] != false,
+      enableFua: json['enableFua'] == true,
+      desiredEnabled: json['desiredEnabled'] == true,
+      ownership: ownership,
+      sizeBytes: (json['sizeBytes'] as num?)?.toInt() ?? 0,
+      sourceUri:
+          json['sourceUri'] as String? ??
+          (ownership == DiskBackingOwnership.linked ? legacyDocumentUri : null),
+      managedDocumentUri:
+          json['managedDocumentUri'] as String? ??
+          (ownership == DiskBackingOwnership.linked ? null : legacyDocumentUri),
+    );
+  }
 }

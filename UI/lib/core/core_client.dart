@@ -58,6 +58,18 @@ class CoreStatus {
   );
 }
 
+class CoreImageProbe {
+  const CoreImageProbe({required this.path, required this.sizeBytes});
+
+  final String path;
+  final int sizeBytes;
+
+  factory CoreImageProbe.fromJson(Map<String, dynamic> json) => CoreImageProbe(
+    path: json['path'] as String,
+    sizeBytes: (json['sizeBytes'] as num).toInt(),
+  );
+}
+
 class CoreClient {
   CoreClient(this._root);
   final RootShellService _root;
@@ -65,6 +77,23 @@ class CoreClient {
 
   Future<void> ping() async => _send('PING');
   Future<void> setConfig(String path) async => _send('SET $path');
+
+  Future<CoreImageProbe> probeImage(String path) async {
+    if (!path.startsWith('/')) {
+      throw ArgumentError.value(path, 'path', 'must be absolute');
+    }
+    final response = await _send('PROBE_IMAGE $path');
+    try {
+      return CoreImageProbe.fromJson(
+        jsonDecode(response) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      throw CoreException(
+        CoreErrorCode.unknown,
+        'Core returned an invalid PROBE_IMAGE payload.',
+      );
+    }
+  }
 
   Future<void> sendBootKey({
     List<String> modifiers = const [],

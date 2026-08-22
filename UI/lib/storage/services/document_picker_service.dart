@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class DirectorySelection {
@@ -7,10 +9,38 @@ class DirectorySelection {
 }
 
 class DocumentSelection {
-  const DocumentSelection(this.uri, this.name, this.size);
+  const DocumentSelection(this.uri, this.name, this.size, {this.directPath});
   final String uri;
   final String name;
   final int size;
+  final String? directPath;
+}
+
+class DocumentCopyProgress {
+  const DocumentCopyProgress(this.copiedBytes, this.totalBytes);
+  final int copiedBytes;
+  final int totalBytes;
+
+  double? get fraction =>
+      totalBytes > 0 ? (copiedBytes / totalBytes).clamp(0.0, 1.0) : null;
+}
+
+class DocumentCopyTask {
+  DocumentCopyTask._(this.operationId);
+
+  final String operationId;
+  final progress = ValueNotifier<DocumentCopyProgress>(
+    const DocumentCopyProgress(0, 0),
+  );
+  late final Future<DocumentWriteResult> result;
+  StreamSubscription<dynamic>? _events;
+
+  Future<void> cancel() => DocumentPickerService.cancelCopy(operationId);
+
+  Future<void> dispose() async {
+    await _events?.cancel();
+    progress.dispose();
+  }
 }
 
 class DocumentWriteResult {
@@ -36,6 +66,13 @@ class DocumentWriteResult {
 
 class DocumentPickerService {
   static const _channel = MethodChannel('org.orynnx.hyperusb/documents');
+  static const _eventChannel = EventChannel(
+    'org.orynnx.hyperusb/document_events',
+  );
+  static final Stream<dynamic> _events = _eventChannel
+      .receiveBroadcastStream()
+      .asBroadcastStream();
+  static int _nextOperation = 0;
 
   static Future<DocumentSelection?> pickFile() async {
     final value = await _channel.invokeMapMethod<String, dynamic>('pickFile');
@@ -45,6 +82,7 @@ class DocumentPickerService {
             value['uri'] as String,
             value['name'] as String,
             (value['size'] as num).toInt(),
+            directPath: value['directPath'] as String?,
           );
   }
 
@@ -58,6 +96,7 @@ class DocumentPickerService {
             value['uri'] as String,
             value['name'] as String,
             (value['size'] as num).toInt(),
+            directPath: value['directPath'] as String?,
           );
   }
 
@@ -86,18 +125,39 @@ class DocumentPickerService {
     return DocumentWriteResult.fromMap(value);
   }
 
-  static Future<DocumentWriteResult> copyDocument(
+  static DocumentCopyTask copyDocument(
     DocumentSelection source,
     DirectorySelection directory,
-  ) async {
-    final value = await _channel
+  ) {
+    final operationId =
+        '${DateTime.now().microsecondsSinceEpoch}-${_nextOperation++}';
+    final task = DocumentCopyTask._(operationId);
+    task._events = _events.listen((dynamic event) {
+      if (event is! Map || event['operationId'] != operationId) return;
+      task.progress.value = DocumentCopyProgress(
+        (event['copiedBytes'] as num?)?.toInt() ?? 0,
+        (event['totalBytes'] as num?)?.toInt() ?? 0,
+      );
+    });
+    task.result = _channel
         .invokeMapMethod<String, dynamic>('copyDocument', {
           'sourceUri': source.uri,
           'treeUri': directory.uri,
           'directoryPath': directory.path,
-        });
-    if (value == null) throw PlatformException(code: 'empty_result');
-    return DocumentWriteResult.fromMap(value);
+          'operationId': operationId,
+        })
+        .then((value) {
+          if (value == null) throw PlatformException(code: 'empty_result');
+          return DocumentWriteResult.fromMap(value);
+        })
+        .whenComplete(() => task._events?.cancel());
+    return task;
+  }
+
+  static Future<void> cancelCopy(String operationId) async {
+    await _channel.invokeMethod<bool>('cancelCopy', {
+      'operationId': operationId,
+    });
   }
 
   static Future<void> deleteDocument(String uri) =>

@@ -482,14 +482,28 @@ fn validate_usb_string(label: &str, value: String) -> ApiResult<String> {
     Ok(value)
 }
 
-fn validate_image_path(path: &Path) -> ApiResult<()> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageProbe {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+}
+
+pub fn probe_image(path: &Path) -> ApiResult<ImageProbe> {
     if !path.is_absolute() {
         return Err(ApiError::new(
-            ApiErrorCode::InvalidConfig,
+            ApiErrorCode::InvalidConfigPath,
             "imagePath 必须是绝对路径",
         ));
     }
-    let metadata = std::fs::metadata(path).map_err(|error| {
+    let canonical_path = std::fs::canonicalize(path).map_err(|error| {
+        let code = if error.kind() == ErrorKind::NotFound {
+            ApiErrorCode::ImageNotFound
+        } else {
+            ApiErrorCode::InvalidConfig
+        };
+        ApiError::new(code, format!("无法访问镜像 {}：{error}", path.display()))
+    })?;
+    let metadata = std::fs::metadata(&canonical_path).map_err(|error| {
         let code = if error.kind() == ErrorKind::NotFound {
             ApiErrorCode::ImageNotFound
         } else {
@@ -503,7 +517,20 @@ fn validate_image_path(path: &Path) -> ApiResult<()> {
             format!("镜像最终目标不是普通文件：{}", path.display()),
         ));
     }
-    Ok(())
+    File::open(&canonical_path).map_err(|error| {
+        ApiError::new(
+            ApiErrorCode::InvalidConfig,
+            format!("镜像不可读取 {}：{error}", canonical_path.display()),
+        )
+    })?;
+    Ok(ImageProbe {
+        path: canonical_path,
+        size_bytes: metadata.len(),
+    })
+}
+
+fn validate_image_path(path: &Path) -> ApiResult<()> {
+    probe_image(path).map(|_| ())
 }
 
 fn default_manufacturer() -> String {
@@ -915,6 +942,16 @@ mod tests {
             ApiErrorCode::ImageNotFile
         );
         let _ = std::fs::remove_dir(directory);
+    }
+
+    #[test]
+    fn probes_regular_image_and_returns_canonical_path_and_size() {
+        let image = test_path("probe image.img");
+        std::fs::write(&image, b"probe").unwrap();
+        let probe = probe_image(&image).unwrap();
+        assert_eq!(probe.path, std::fs::canonicalize(&image).unwrap());
+        assert_eq!(probe.size_bytes, 5);
+        let _ = std::fs::remove_file(image);
     }
 
     #[test]
