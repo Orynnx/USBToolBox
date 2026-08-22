@@ -8,8 +8,8 @@ use serde::Deserialize;
 
 use crate::usb_sub::usb_protocol::{ApiError, ApiErrorCode, ApiResult};
 use crate::usb_sub::{
-    GadgetIdentity, StorageLun, UsbConfiguration, UsbProfile, UsbTargetState, UvcConfig, UvcFormat,
-    UvcFormatKind, UvcFrame,
+    GadgetIdentity, MacAddress, StorageLun, UsbConfiguration, UsbNcm, UsbProfile, UsbTargetState,
+    UvcConfig, UvcFormat, UvcFormatKind, UvcFrame,
 };
 
 pub const MAX_CONFIG_BYTES: u64 = 64 * 1024;
@@ -29,6 +29,8 @@ struct ConfigFile {
     serial: SerialConfig,
     #[serde(default)]
     uvc: UvcFileConfig,
+    #[serde(default)]
+    ncm: NcmFileConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +117,17 @@ struct UvcFrameFile {
     height: u32,
     #[serde(default)]
     fps: Vec<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NcmFileConfig {
+    #[serde(default)]
+    enabled: bool,
+    device_mac: Option<String>,
+    host_mac: Option<String>,
+    qmult: Option<u32>,
+    ifname: Option<String>,
 }
 
 pub fn load_configuration(path: &Path) -> ApiResult<UsbTargetState> {
@@ -205,8 +218,11 @@ pub fn parse_configuration(snapshot: &[u8]) -> ApiResult<UsbTargetState> {
             config.disk.read_only.unwrap_or(false)
         };
         storage_luns.push(StorageLun {
-            image: Some(image), read_only, removable: config.disk.removable,
-            cdrom: config.disk.cdrom, no_fua: config.disk.no_fua.unwrap_or(config.disk.cdrom),
+            image: Some(image),
+            read_only,
+            removable: config.disk.removable,
+            cdrom: config.disk.cdrom,
+            no_fua: config.disk.no_fua.unwrap_or(config.disk.cdrom),
             ejected: false,
         });
     } else {
@@ -216,13 +232,14 @@ pub fn parse_configuration(snapshot: &[u8]) -> ApiResult<UsbTargetState> {
     }
     reject_duplicate_backing_files(&storage_luns)?;
 
-    let profile = UsbProfile {
+    let mut profile = UsbProfile {
         keyboard_enabled: config.keyboard.boot,
         serial_enabled: config.serial.enabled,
         uvc: parse_uvc_config(config.uvc)?,
+        ncm: None,
         storage_luns,
     };
-    if !profile.has_functions() {
+    if !profile.has_functions() && !config.ncm.enabled {
         return Ok(UsbTargetState::AndroidUsb);
     }
 
@@ -239,6 +256,7 @@ pub fn parse_configuration(snapshot: &[u8]) -> ApiResult<UsbTargetState> {
         )
     })?;
     let serial_number = validate_usb_string("serialNumber", serial_number)?;
+    profile.ncm = parse_ncm_config(config.ncm, &serial_number)?;
     let manufacturer = validate_usb_string("manufacturer", device.manufacturer)?;
     let product = validate_usb_string("product", device.product)?;
     let identity = GadgetIdentity {
@@ -268,8 +286,12 @@ fn parse_storage_lun(lun: StorageLunConfig) -> ApiResult<StorageLun> {
         ));
     }
     Ok(StorageLun {
-        image: Some(lun.image_path), read_only: lun.read_only, removable: lun.removable,
-        cdrom: lun.cdrom, no_fua: lun.no_fua, ejected: false,
+        image: Some(lun.image_path),
+        read_only: lun.read_only,
+        removable: lun.removable,
+        cdrom: lun.cdrom,
+        no_fua: lun.no_fua,
+        ejected: false,
     })
 }
 
@@ -277,10 +299,12 @@ fn reject_duplicate_backing_files(luns: &[StorageLun]) -> ApiResult<()> {
     let mut seen = std::collections::HashSet::new();
     for lun in luns {
         let image = lun.image.as_ref().expect("parsed storage LUN has an image");
-        let canonical = std::fs::canonicalize(image).map_err(|error| ApiError::new(
-            ApiErrorCode::InvalidConfig,
-            format!("无法规范化镜像 {}：{error}", image.display()),
-        ))?;
+        let canonical = std::fs::canonicalize(image).map_err(|error| {
+            ApiError::new(
+                ApiErrorCode::InvalidConfig,
+                format!("无法规范化镜像 {}：{error}", image.display()),
+            )
+        })?;
         if !seen.insert(canonical) {
             return Err(ApiError::new(
                 ApiErrorCode::DuplicateBackingFile,
@@ -289,6 +313,44 @@ fn reject_duplicate_backing_files(luns: &[StorageLun]) -> ApiResult<()> {
         }
     }
     Ok(())
+}
+
+fn parse_ncm_config(config: NcmFileConfig, serial_number: &str) -> ApiResult<Option<UsbNcm>> {
+    if !config.enabled {
+        return Ok(None);
+    }
+
+    let device_explicit = config.device_mac.is_some();
+    let host_explicit = config.host_mac.is_some();
+    let device_mac = match config.device_mac {
+        Some(value) => MacAddress::parse(&value).map_err(invalid_ncm)?,
+        None => MacAddress::derive(serial_number, 0),
+    };
+    let mut host_mac = match config.host_mac {
+        Some(value) => MacAddress::parse(&value).map_err(invalid_ncm)?,
+        None => MacAddress::derive(serial_number, 1),
+    };
+    if device_mac == host_mac {
+        if host_explicit || device_explicit {
+            return Err(invalid_ncm("deviceMac 和 hostMac 不能相同"));
+        }
+        host_mac = MacAddress::derive(serial_number, 2);
+    }
+    let ncm = UsbNcm {
+        device_mac,
+        host_mac,
+        qmult: config.qmult,
+        ifname: config.ifname,
+    };
+    ncm.validate().map_err(invalid_ncm)?;
+    Ok(Some(ncm))
+}
+
+fn invalid_ncm(error: impl std::fmt::Display) -> ApiError {
+    ApiError::new(
+        ApiErrorCode::InvalidConfig,
+        format!("NCM 配置无效：{error}"),
+    )
 }
 
 fn parse_uvc_config(config: UvcFileConfig) -> ApiResult<Option<UvcConfig>> {
@@ -557,6 +619,7 @@ mod tests {
             br#"{"device":{"serialNumber":"TEST"},"keyboard":{"boot":"yes"}}"#,
             br#"{"device":{"serialNumber":"TEST"},"serial":{"enabled":"yes"}}"#,
             br#"{"device":{"serialNumber":"TEST"},"uvc":{"enabled":"yes"}}"#,
+            br#"{"device":{"serialNumber":"TEST"},"ncm":{"enabled":"yes"}}"#,
             br#"{"device":{"serialNumber":"TEST"},"uvc":{"enabled":true,"formats":[{"format":"mjpeg","frames":[{"width":"1280","height":720,"fps":[30]}]}]}}"#,
             br#"{"device":{"serialNumber":"TEST"},"disk":{"enabled":false,"cdrom":1},"keyboard":{"boot":true}}"#,
         ] {
@@ -581,6 +644,75 @@ mod tests {
         assert!(config.profile.serial_enabled);
         assert!(!config.profile.keyboard_enabled);
         assert!(config.profile.storage_luns.is_empty());
+    }
+
+    #[test]
+    fn parses_ncm_defaults_from_serial() {
+        let config = active(
+            parse_configuration(
+                br#"{
+                    "device":{"serialNumber":"NCM-001"},
+                    "ncm":{"enabled":true}
+                }"#,
+            )
+            .unwrap(),
+        );
+        let ncm = config.profile.ncm.as_ref().unwrap();
+        assert_eq!(ncm.device_mac, MacAddress::derive("NCM-001", 0));
+        assert_eq!(ncm.host_mac, MacAddress::derive("NCM-001", 1));
+        assert_ne!(ncm.device_mac, ncm.host_mac);
+        assert_eq!(ncm.qmult, None);
+        assert_eq!(ncm.ifname, None);
+    }
+
+    #[test]
+    fn parses_and_validates_explicit_ncm_attributes() {
+        let json = serde_json::json!({
+            "device": {"serialNumber": "NCM-002"},
+            "ncm": {
+                "enabled": true,
+                "deviceMac": "0A:48:59:50:45:01",
+                "hostMac": "0a:48:59:50:45:02",
+                "qmult": 5,
+                "ifname": "hyperusb%d"
+            }
+        });
+        let config = active(parse_configuration(&serde_json::to_vec(&json).unwrap()).unwrap());
+        let ncm = config.profile.ncm.unwrap();
+        assert_eq!(ncm.device_mac.as_configfs(), "0a:48:59:50:45:01");
+        assert_eq!(ncm.host_mac.as_configfs(), "0a:48:59:50:45:02");
+        assert_eq!(ncm.qmult, Some(5));
+        assert_eq!(ncm.ifname.as_deref(), Some("hyperusb%d"));
+
+        for invalid in [
+            serde_json::json!({
+                "device": {"serialNumber": "NCM-002"},
+                "ncm": {"enabled": true, "deviceMac": "01:48:59:50:45:01"}
+            }),
+            serde_json::json!({
+                "device": {"serialNumber": "NCM-002"},
+                "ncm": {
+                    "enabled": true,
+                    "deviceMac": "02:48:59:50:45:01",
+                    "hostMac": "02:48:59:50:45:01"
+                }
+            }),
+            serde_json::json!({
+                "device": {"serialNumber": "NCM-002"},
+                "ncm": {"enabled": true, "qmult": 0}
+            }),
+            serde_json::json!({
+                "device": {"serialNumber": "NCM-002"},
+                "ncm": {"enabled": true, "ifname": "name with spaces"}
+            }),
+        ] {
+            assert_eq!(
+                parse_configuration(&serde_json::to_vec(&invalid).unwrap())
+                    .unwrap_err()
+                    .code,
+                ApiErrorCode::InvalidConfig
+            );
+        }
     }
 
     #[test]
@@ -698,7 +830,8 @@ mod tests {
             "device": {"serialNumber": "TEST"},
             "disk": {"enabled": true, "imagePath": image, "noFua": true}
         });
-        let profile = active(parse_configuration(&serde_json::to_vec(&json).unwrap()).unwrap()).profile;
+        let profile =
+            active(parse_configuration(&serde_json::to_vec(&json).unwrap()).unwrap()).profile;
         assert_eq!(profile.storage_luns.len(), 1);
         assert!(profile.storage_luns[0].no_fua);
         let _ = std::fs::remove_file(image);
@@ -717,7 +850,8 @@ mod tests {
                 {"imagePath": second, "readOnly": true, "removable": true, "noFua": true}
             ]}
         });
-        let profile = active(parse_configuration(&serde_json::to_vec(&json).unwrap()).unwrap()).profile;
+        let profile =
+            active(parse_configuration(&serde_json::to_vec(&json).unwrap()).unwrap()).profile;
         assert_eq!(profile.storage_luns.len(), 2);
         assert!(!profile.storage_luns[0].no_fua);
         assert!(profile.storage_luns[1].no_fua);
@@ -744,14 +878,24 @@ mod tests {
                 "device": {"serialNumber": "TEST"},
                 "storage": {"luns": [{"imagePath": image}, {"imagePath": link}]}
             });
-            assert_eq!(parse_configuration(&serde_json::to_vec(&duplicate).unwrap()).unwrap_err().code, ApiErrorCode::DuplicateBackingFile);
+            assert_eq!(
+                parse_configuration(&serde_json::to_vec(&duplicate).unwrap())
+                    .unwrap_err()
+                    .code,
+                ApiErrorCode::DuplicateBackingFile
+            );
         }
         let conflict = serde_json::json!({
             "device": {"serialNumber": "TEST"},
             "disk": {"enabled": true, "imagePath": image},
             "storage": {"luns": [{"imagePath": link}]}
         });
-        assert_eq!(parse_configuration(&serde_json::to_vec(&conflict).unwrap()).unwrap_err().code, ApiErrorCode::InvalidConfig);
+        assert_eq!(
+            parse_configuration(&serde_json::to_vec(&conflict).unwrap())
+                .unwrap_err()
+                .code,
+            ApiErrorCode::InvalidConfig
+        );
         let _ = std::fs::remove_file(link);
         let _ = std::fs::remove_file(image);
     }

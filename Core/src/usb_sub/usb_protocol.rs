@@ -79,12 +79,13 @@ pub enum ApiRequest {
     Ping,
     Status,
     BootKey(KeyChord),
+    NetStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiResponse {
     Ok,
-    Status(String),
+    OkJson(String),
     Error(ApiErrorCode),
 }
 
@@ -92,7 +93,7 @@ impl ApiResponse {
     pub fn encode(self) -> String {
         match self {
             Self::Ok => "OK\n".into(),
-            Self::Status(payload) => format!("OK {payload}\n"),
+            Self::OkJson(json) => format!("OK {json}\n"),
             Self::Error(code) => format!("ERR {}\n", code.as_str()),
         }
     }
@@ -126,6 +127,15 @@ pub fn parse_request(line: &str) -> ApiResult<ApiRequest> {
     }
     if command.eq_ignore_ascii_case("BOOT_KEY") {
         return parse_boot_key(arguments).map(ApiRequest::BootKey);
+    }
+    if command.eq_ignore_ascii_case("NET_STATUS") {
+        if !arguments.is_empty() {
+            return Err(ApiError::new(
+                ApiErrorCode::InvalidCommand,
+                "NET_STATUS 不接受参数",
+            ));
+        }
+        return Ok(ApiRequest::NetStatus);
     }
     Err(ApiError::new(ApiErrorCode::InvalidCommand, "未知命令"))
 }
@@ -330,10 +340,7 @@ mod tests {
         let ApiRequest::BootKey(chord2) = parse_request("BOOT_KEY CTRL ALT DEL").unwrap() else {
             panic!("expected boot key");
         };
-        assert_eq!(
-            chord2.modifiers,
-            Modifiers::LEFT_CTRL | Modifiers::LEFT_ALT
-        );
+        assert_eq!(chord2.modifiers, Modifiers::LEFT_CTRL | Modifiers::LEFT_ALT);
         assert_eq!(chord2.keys, vec![Key::Delete]);
     }
 
@@ -400,6 +407,31 @@ mod tests {
         assert_eq!(
             parse_request("PING now").unwrap_err().code,
             ApiErrorCode::InvalidCommand
+        );
+        assert_eq!(
+            parse_request("STATUS now").unwrap_err().code,
+            ApiErrorCode::InvalidCommand
+        );
+    }
+
+    #[test]
+    fn net_status_is_case_insensitive_and_argument_free() {
+        assert_eq!(parse_request("net_status").unwrap(), ApiRequest::NetStatus);
+        assert_eq!(
+            parse_request("NET_STATUS abc").unwrap_err().code,
+            ApiErrorCode::InvalidCommand
+        );
+        assert_eq!(
+            parse_request("NET_STATUS something").unwrap_err().code,
+            ApiErrorCode::InvalidCommand
+        );
+    }
+
+    #[test]
+    fn json_response_is_single_line() {
+        assert_eq!(
+            ApiResponse::OkJson(r#"{"enabled":false}"#.into()).encode(),
+            "OK {\"enabled\":false}\n"
         );
     }
 

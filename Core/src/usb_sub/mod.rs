@@ -13,6 +13,7 @@ pub mod usb_daemon;
 pub mod usb_gadget;
 pub mod usb_hid;
 pub mod usb_model;
+pub mod usb_ncm;
 pub mod usb_protocol;
 pub mod usb_recovery;
 pub mod usb_serial;
@@ -45,6 +46,8 @@ pub use usb_model::{
     UsbConfiguration, UsbProfile, UsbRuntimeConfig, UsbRuntimeState, UsbTargetState, UvcConfig,
     UvcFormat, UvcFormatKind, UvcFrame,
 };
+#[allow(unused_imports)]
+pub use usb_ncm::{MacAddress, NetStatus, UsbNcm, DEFAULT_IFNAME, NCM_INSTANCE, SYS_NET_PATH};
 #[allow(unused_imports)]
 pub use usb_recovery::{UsbRecoveryState, DEFAULT_USB_STATE_PATH, LEGACY_USB_STATE_PATH};
 #[allow(unused_imports)]

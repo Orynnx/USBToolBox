@@ -17,6 +17,7 @@ SET <absolute-config-path>
 PING
 STATUS
 BOOT_KEY <modifier>... <key>
+NET_STATUS
 ```
 
 响应：
@@ -35,6 +36,8 @@ OK {"state":"active","storageLuns":[...],"keyboard":false,"serial":false,"uvc":f
 停止状态为 `state:"android"` 且 `storageLuns` 为空。状态由 Core 的实际会话生成，不能由 Socket 文件存在与否推断。
 
 每条命令以 `\n` 或 `\r\n` 结束，最大 8 KiB。一个连接可以连续执行多条命令。命令名和按键名大小写不敏感，参数使用一个或多个 ASCII 空白分隔。
+
+`NET_STATUS` 不接受参数；带参数时返回 `ERR invalid_command`。它是只读查询，即使当前没有活动 HyperUSB 会话也返回成功。
 
 ---
 
@@ -146,6 +149,14 @@ ERR restore_failed
     "enabled": true
   },
 
+  "ncm": {
+    "enabled": true,
+    "deviceMac": "02:48:59:50:45:01",
+    "hostMac": "02:48:59:50:45:02",
+    "qmult": 5,
+    "ifname": "hyperusb%d"
+  },
+
   "uvc": {
     "enabled": true,
     "formats": [
@@ -176,7 +187,7 @@ ERR invalid_config
 
 最终没有启用实际 Function时，不要求 `device`或 `serialNumber`，也不校验 VID/PID和其他 identity字段。
 
-启用 Boot Keyboard、Serial、UVC 或 Disk时，`device`必须存在，`serialNumber`必须由调用方提供且非空。
+启用 Boot Keyboard、Serial、UVC、NCM 或 Disk时，`device`必须存在，`serialNumber`必须由调用方提供且非空。
 
 所有显式提供的 USB 字符串不能包含 NUL、CR或 LF，最长 126个 UTF-16 code unit。
 
@@ -310,7 +321,61 @@ Linux Gadget 会在 Function 创建后分配只读的 `port_num`。读取该值 
 发送 CDC ACM 的 `SET_LINE_CODING`、`SET_CONTROL_LINE_STATE` 和 `BREAK` 请求；这些参数
 属于 Host 运行时状态，不改变 USB Bulk 传输本身的速率。
 
-## 8. UVC Runtime 契约（v1）
+## 8. ncm
+
+```json
+{
+  "device": {
+    "serialNumber": "HYPERUSB-NCM-001"
+  },
+  "ncm": {
+    "enabled": true,
+    "deviceMac": "02:48:59:50:45:01",
+    "hostMac": "02:48:59:50:45:02",
+    "qmult": 5,
+    "ifname": "hyperusb%d"
+  }
+}
+```
+
+`ncm.enabled=false`（默认值）时不创建 NCM Function。启用 NCM 时，调用方必须提供非空
+`device.serialNumber`；未提供 `deviceMac` 或 `hostMac` 时，Core 根据 serial 稳定派生本地管理的
+单播 MAC，且同一 serial 每次保持一致。显式 MAC 必须是六组十六进制字节、不能是 multicast，
+且 `deviceMac` 与 `hostMac` 不能相同；大小写会规范化为小写 ConfigFS 值。
+
+`qmult` 可省略。省略时 Core 不写 `functions/ncm.hyperusb/qmult`，使用内核默认值；显式提供时
+必须是 `1..65535` 并写入 ConfigFS。`ifname` 可省略，默认写入 `hyperusb%d`；显式值必须非空、
+不超过 15 个 UTF-8 字节且只包含字母、数字、`_`、`-` 或 `%`。这里的值是 ConfigFS 提供给
+内核的命名模板，不一定是最终网卡名。UDC bind 后 Core 根据 `deviceMac` 枚举
+`/sys/class/net/*/address`，记录匹配到的实际 netdev 名称；找不到匹配项则视为激活失败。
+
+NCM Function 固定为 `ncm.hyperusb`。Core 只负责建立 USB Ethernet link，不配置 DHCP、静态 IP、
+NAT、DNS、IP forwarding、路由或网络共享；IP 连通性由上层或测试脚本自行配置。
+
+### NET_STATUS
+
+`NET_STATUS` 返回当前实际运行状态，而不是原始配置内容：
+
+```text
+NET_STATUS
+```
+
+NCM 活动时，`ifname` 是 UDC bind 后根据设备 MAC 从 `/sys/class/net` 找到的实际 netdev 名称，
+不是 `hyperusb%d` 这样的 ConfigFS 命名模板：
+
+```text
+OK {"enabled":true,"ifname":"hyperusb0","deviceMac":"02:48:59:50:45:01","hostMac":"02:48:59:50:45:02"}
+```
+
+NCM 未启用、HyperUSB 未启动或 `SET {}` 后：
+
+```text
+OK {"enabled":false}
+```
+
+返回值不包含 `qmult`、IP 地址、路由、Gateway、DNS、DHCP、NAT 或防火墙信息。配置变更失败并成功回滚时，查询仍返回旧的实际 NCM 状态。
+
+## 9. UVC Runtime 契约（v1）
 
 独立于 `usb.sock` 的运行时数据通道（仅 Producer 与 Core 通讯）：
 
@@ -390,7 +455,7 @@ Host 的 Probe/Commit 会归一化到 JSON 中声明的 format/frame/fps，并�
 Producer；`STREAM_ON` 后 Core 才接受并提交 `FRAME`。UVC Function 或 V4L2 output 节点
 启动失败会作为 UVC Runtime 启动失败返回，不会报告一个实际不可用的 UVC 会话。
 
-## 9. uvc
+## 10. uvc
 
 ```json
 {
@@ -428,7 +493,7 @@ Producer；`STREAM_ON` 后 Core 才接受并提交 `FRAME`。UVC Function 或 V4
 Core 负责声明 UVC 能力、响应 Host 协商并把 Producer 帧写入 Gadget 的 V4L2 output；视频
 来源仍由 Producer 决定，不由本配置决定。
 
-## 10. BOOT_KEY
+## 11. BOOT_KEY
 
 `BOOT_KEY` 执行一次完整的按键组合：
 
@@ -529,7 +594,7 @@ ERR internal_error
 
 ---
 
-## 11. 空配置与 Daemon退出
+## 12. 空配置与 Daemon退出
 
 没有单独的 `STOP` 命令。
 
@@ -574,7 +639,7 @@ SET
 
 ---
 
-## 12. 错误码
+## 13. 错误码
 
 ```text
 invalid_command
@@ -602,7 +667,7 @@ internal_error
 HyperUSBCore
 ```
 
-## 13. 上层调用模型
+## 14. 上层调用模型
 
 最终 API 可以概括为：
 

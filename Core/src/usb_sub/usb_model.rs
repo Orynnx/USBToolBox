@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::usb_sub::usb_gadget::GadgetIdentity;
+use crate::usb_sub::usb_ncm::UsbNcm;
 use crate::usb_sub::usb_recovery::DEFAULT_USB_STATE_PATH;
 use crate::usb_sub::usb_storage::StorageLun;
 use crate::usb_sub::UsbResult;
@@ -28,6 +29,7 @@ impl UsbConfiguration {
 
 /// `SET` 的声明式目标：活动 HyperUSB配置，或完全恢复 Android USB。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum UsbTargetState {
     AndroidUsb,
     HyperUsb(UsbConfiguration),
@@ -127,6 +129,7 @@ pub struct UsbProfile {
     pub keyboard_enabled: bool,
     pub serial_enabled: bool,
     pub uvc: Option<UvcConfig>,
+    pub ncm: Option<UsbNcm>,
     pub storage_luns: Vec<StorageLun>,
 }
 
@@ -135,6 +138,7 @@ impl UsbProfile {
         self.keyboard_enabled
             || self.serial_enabled
             || self.uvc.is_some()
+            || self.ncm.is_some()
             || !self.storage_luns.is_empty()
     }
 
@@ -189,6 +193,7 @@ pub enum UsbRuntimeState {
         keyboard_enabled: bool,
         serial_enabled: bool,
         uvc_enabled: bool,
+        ncm_enabled: bool,
         storage_count: usize,
     },
 }
@@ -213,6 +218,7 @@ mod tests {
             keyboard_enabled: true,
             serial_enabled: false,
             uvc: None,
+            ncm: None,
             storage_luns: Vec::new(),
         }
         .validate()
@@ -222,6 +228,7 @@ mod tests {
             keyboard_enabled: false,
             serial_enabled: false,
             uvc: None,
+            ncm: None,
             storage_luns: vec![StorageLun::ejected_disk()],
         }
         .validate()

@@ -78,9 +78,12 @@ fn configure_formats(function_path: &Path, config: &UvcConfig) -> UsbResult<()> 
                 &frame_path.join("dwMaxVideoFrameBufferSize"),
                 frame_buffer_size(frame.width, frame.height),
             )?;
-            let default_interval = frame_interval(*frame.fps.first().ok_or_else(|| {
-                UsbError::InvalidInput("UVC frame 缺少 fps".into())
-            })?)?;
+            let default_interval = frame_interval(
+                *frame
+                    .fps
+                    .first()
+                    .ok_or_else(|| UsbError::InvalidInput("UVC frame 缺少 fps".into()))?,
+            )?;
             write_attribute(&frame_path.join("dwDefaultFrameInterval"), default_interval)?;
             let intervals = frame
                 .fps

@@ -39,15 +39,20 @@ impl UsbController {
     }
 
     fn execute(&mut self, request: ApiRequest) -> ApiResponse {
-        if matches!(request, ApiRequest::Ping) { return ApiResponse::Ok; }
-        if matches!(request, ApiRequest::Status) { return ApiResponse::Status(self.status_json()); }
+        if matches!(request, ApiRequest::Ping) {
+            return ApiResponse::Ok;
+        }
+        if matches!(request, ApiRequest::Status) {
+            return ApiResponse::OkJson(self.status_json());
+        }
         let result = match request {
-            ApiRequest::Set(path) => self.set(&path),
-            ApiRequest::BootKey(chord) => self.boot_key(&chord),
+            ApiRequest::Set(path) => self.set(&path).map(|()| ApiResponse::Ok),
+            ApiRequest::BootKey(chord) => self.boot_key(&chord).map(|()| ApiResponse::Ok),
+            ApiRequest::NetStatus => self.net_status(),
             ApiRequest::Ping | ApiRequest::Status => unreachable!("handled above"),
         };
         match result {
-            Ok(()) => ApiResponse::Ok,
+            Ok(response) => response,
             Err(error) => {
                 warn!("API command failed: {error}");
                 ApiResponse::Error(error.code)
@@ -60,18 +65,24 @@ impl UsbController {
             return r#"{"state":"android","storageLuns":[],"keyboard":false,"serial":false,"uvc":false}"#.into();
         };
         let profile = session.profile();
-        let luns = profile.storage_luns.iter().map(|lun| serde_json::json!({
-            "imagePath": lun.image.as_ref().map(|path| path.to_string_lossy().into_owned()),
-            "readOnly": lun.read_only, "removable": lun.removable,
-            "cdrom": lun.cdrom, "noFua": lun.no_fua,
-        })).collect::<Vec<_>>();
+        let luns = profile
+            .storage_luns
+            .iter()
+            .map(|lun| {
+                serde_json::json!({
+                    "imagePath": lun.image.as_ref().map(|path| path.to_string_lossy().into_owned()),
+                    "readOnly": lun.read_only, "removable": lun.removable,
+                    "cdrom": lun.cdrom, "noFua": lun.no_fua,
+                })
+            })
+            .collect::<Vec<_>>();
         serde_json::json!({
             "state": "active", "storageLuns": luns,
             "keyboard": profile.keyboard_enabled, "serial": profile.serial_enabled,
             "uvc": profile.uvc.is_some(), "udc": session.udc(),
-        }).to_string()
+        })
+        .to_string()
     }
-
 
     fn set(&mut self, path: &Path) -> Result<(), ApiError> {
         let target = load_configuration(path)?;
@@ -154,6 +165,22 @@ impl UsbController {
             .map_err(internal_error)
     }
 
+    fn net_status(&self) -> Result<ApiResponse, ApiError> {
+        let status = self
+            .session
+            .as_ref()
+            .map_or_else(crate::usb_sub::NetStatus::disabled, |session| {
+                session.net_status().clone()
+            });
+        let json = status.to_json().map_err(|error| {
+            ApiError::new(
+                ApiErrorCode::InternalError,
+                format!("序列化 NET_STATUS 失败：{error}"),
+            )
+        })?;
+        Ok(ApiResponse::OkJson(json))
+    }
+
     fn stop(&mut self) -> Result<(), ApiError> {
         let release_error = self.release_keyboard().err();
         let stop_result = match self.session.take() {
@@ -200,7 +227,6 @@ fn map_start_error(error: UsbError) -> ApiError {
 fn internal_error(error: UsbError) -> ApiError {
     ApiError::new(ApiErrorCode::InternalError, error.to_string())
 }
-
 
 #[cfg(unix)]
 mod platform {
@@ -600,6 +626,15 @@ mod platform {
                 BoundedLine::Line(line) => assert_eq!(line, b"boot_key enter"),
                 _ => panic!("expected second line"),
             }
+        }
+
+        #[test]
+        fn net_status_without_session_returns_disabled_json() {
+            let mut controller = UsbController::new(UsbRuntimeConfig::default());
+            assert_eq!(
+                controller.execute(ApiRequest::NetStatus).encode(),
+                "OK {\"enabled\":false}\n"
+            );
         }
 
         #[test]
