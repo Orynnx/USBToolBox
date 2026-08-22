@@ -14,6 +14,7 @@ HyperUSB Core 是常驻 Root Daemon。上层通过 Unix Domain Socket **声明�
 
 ```text
 SET <absolute-config-path>
+PROBE_IMAGE <absolute-image-path>
 PING
 STATUS
 BOOT_KEY <modifier>... <key>
@@ -38,6 +39,14 @@ OK {"state":"active","storageLuns":[...],"keyboard":false,"serial":false,"uvc":f
 每条命令以 `\n` 或 `\r\n` 结束，最大 8 KiB。一个连接可以连续执行多条命令。命令名和按键名大小写不敏感，参数使用一个或多个 ASCII 空白分隔。
 
 `NET_STATUS` 不接受参数；带参数时返回 `ERR invalid_command`。它是只读查询，即使当前没有活动 HyperUSB 会话也返回成功。
+
+`PROBE_IMAGE` 是只读检查，不改变当前 USB 状态。它将路径规范化并验证目标是 Core 可读取的普通文件；成功时返回：
+
+```text
+OK {"path":"/storage/emulated/0/example.img","sizeBytes":1048576}
+```
+
+路径不存在、不是普通文件或不可访问时分别返回 `ERR image_not_found`、`ERR image_not_file` 或相应的访问错误。上层必须以响应中的规范化路径作为后续磁盘配置路径。
 
 ---
 
