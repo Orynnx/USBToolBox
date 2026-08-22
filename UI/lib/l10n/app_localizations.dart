@@ -20,8 +20,16 @@ class AppLocalizations {
   static AppLocalizations of(BuildContext context) =>
       Localizations.of<AppLocalizations>(context, AppLocalizations)!;
 
-  String text(String key) =>
-      _values[locale.languageCode]?[key] ?? _values['zh']?[key] ?? key;
+  String text(String key) {
+    final lang = _values[locale.languageCode] ?? _values['zh']!;
+    if (lang.containsKey(key)) return lang[key]!;
+    final lowerKey = key.isNotEmpty ? key[0].toLowerCase() + key.substring(1) : key;
+    if (lang.containsKey(lowerKey)) return lang[lowerKey]!;
+    final upperKey = key.isNotEmpty ? key[0].toUpperCase() + key.substring(1) : key;
+    if (lang.containsKey(upperKey)) return lang[upperKey]!;
+    final zh = _values['zh']!;
+    return zh[key] ?? zh[lowerKey] ?? zh[upperKey] ?? key;
+  }
 }
 
 class _AppLocalizationsDelegate
@@ -165,6 +173,17 @@ const _values = <String, Map<String, String>>{
     'frontendUi': '前端 UI 界面',
     'coreEngine': '核心引擎 Core',
     'openSourceLicense': '开源许可证',
+    'developerName': 'Orynnx',
+    'developerSlogan': '凛野想要，凛野得到！',
+    'easterEggNotice': '补药点了！！！',
+    'versionInfo': '版本信息',
+    'currentVersion': '当前版本',
+    'usbCoreVersion': 'USB Core 版本',
+    'thankYouTitle': '致谢与反馈',
+    'thankYouMsg1': '感谢你使用我开发的HyperUSB！',
+    'thankYouMsg2': '希望这个软件能帮上你忙！',
+    'thankYouMsg3': '如果你有任何问题和建议，可以通过以下渠道联系我：',
+    'copiedToClipboard': '已复制到剪贴板',
 
     // -------------------------------------------------------------
     // 虚拟磁盘模块 (Virtual Disk)
@@ -225,6 +244,8 @@ const _values = <String, Map<String, String>>{
     'selectDestinationFolder': '请选择有效的保存目录',
     'deleteConfirmTitle': '删除存储设备',
     'deleteConfigDescription': '确定要从列表中移除设备“%s”吗？',
+    'DeleteConfigDescription': '确定要从列表中移除设备“%s”吗？',
+    'deleteConfirmDescription': '确定要从列表中移除设备“%s”吗？',
     'deleteImageFile': '同时从存储中删除镜像文件',
     'deleteImageFileDescription': '彻底从设备存储空间中删除该底层镜像',
     'deleteImageUnavailable': '未获取该镜像文件的删除权限，仅移除配置记录',
@@ -321,6 +342,13 @@ const _values = <String, Map<String, String>>{
     'cameraPermissionDenied': '相机权限已被拒绝，无法开启摄像头',
     'screenPermissionDenied': '录屏权限已被拒绝，无法推流屏幕',
     'videoFileRequired': '请先选择要推流的视频文件',
+    'uvcCapabilityDesc': '启用USB摄像头能力支持',
+    'enableStreaming': '启用传输',
+    'rotateCamera': '旋转相机',
+    'rotateCameraDesc': '将相机顺时针旋转90°',
+    'rotateAction': '旋转 90°',
+    'supportedResolutionsFps': '支持的分辨率和刷新率',
+    'cameraCapabilityFetch': '获取相机的输出能力列表',
 
     // -------------------------------------------------------------
     // USB 网卡 (Network Adapter)
@@ -477,6 +505,17 @@ const _values = <String, Map<String, String>>{
     'frontendUi': 'Frontend UI',
     'coreEngine': 'Core Engine',
     'openSourceLicense': 'Open Source License',
+    'developerName': 'Orynnx',
+    'developerSlogan': 'Rinya wants it, Rinya gets it!',
+    'easterEggNotice': 'DOONNNTTT CLICK ME!!!!!!!',
+    'versionInfo': 'Version Information',
+    'currentVersion': 'Current Version',
+    'usbCoreVersion': 'USB Core Version',
+    'thankYouTitle': 'Acknowledgements & Feedback',
+    'thankYouMsg1': 'Thank you for using HyperUSB!',
+    'thankYouMsg2': 'Hope this software helps you out!',
+    'thankYouMsg3': 'If you have any questions or suggestions, feel free to contact me via:',
+    'copiedToClipboard': 'Copied to clipboard',
 
     // -------------------------------------------------------------
     // Virtual Disk Module
@@ -537,6 +576,8 @@ const _values = <String, Map<String, String>>{
     'selectDestinationFolder': 'Please select a valid destination folder',
     'deleteConfirmTitle': 'Delete Storage Device',
     'deleteConfigDescription': 'Are you sure you want to remove device "%s"?',
+    'DeleteConfigDescription': 'Are you sure you want to remove device "%s"?',
+    'deleteConfirmDescription': 'Are you sure you want to remove device "%s"?',
     'deleteImageFile': 'Also delete image file from storage',
     'deleteImageFileDescription': 'Permanently delete the backing image from device storage',
     'deleteImageUnavailable': 'No delete permission for this image file, only removing configuration',
@@ -633,6 +674,13 @@ const _values = <String, Map<String, String>>{
     'cameraPermissionDenied': 'Camera permission denied, unable to start webcam',
     'screenPermissionDenied': 'Screen capture permission denied, unable to stream screen',
     'videoFileRequired': 'Please select a video file to stream first',
+    'uvcCapabilityDesc': 'Enable USB webcam capability support',
+    'enableStreaming': 'Enable Streaming',
+    'rotateCamera': 'Rotate Camera',
+    'rotateCameraDesc': 'Rotate camera 90° clockwise',
+    'rotateAction': 'Rotate 90°',
+    'supportedResolutionsFps': 'Supported Resolutions & Frame Rates',
+    'cameraCapabilityFetch': 'Camera Output Capabilities',
 
     // -------------------------------------------------------------
     // USB Network Adapter

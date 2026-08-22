@@ -96,4 +96,57 @@ void main() {
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
   });
+
+  testWidgets('cam screen displays capability switch, source selector, and stream switch', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const HyperUsbApp());
+    final camEntry = find.text('虚拟摄像头');
+    await tester.ensureVisible(camEntry);
+    await tester.tap(camEntry);
+    await tester.pumpAndSettle();
+
+    expect(find.text('USB 摄像头'), findsWidgets);
+    expect(find.text('启用USB摄像头能力支持'), findsOneWidget);
+    expect(find.text('后置'), findsOneWidget);
+    expect(find.text('前置'), findsOneWidget);
+    expect(find.text('屏幕'), findsOneWidget);
+    expect(find.text('视频文件'), findsOneWidget);
+    expect(find.text('启用传输'), findsOneWidget);
+  });
+
+  testWidgets('about screen displays developer info, 5-tap easter egg, version card, and contact channels', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const HyperUsbApp());
+    // Navigate to Settings bottom nav tab
+    final settingsNav = find.text('设置');
+    await tester.tap(settingsNav);
+    await tester.pumpAndSettle();
+
+    // Tap 关于
+    final aboutTile = find.text('关于');
+    await tester.tap(aboutTile);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Orynnx'), findsOneWidget);
+    expect(find.text('凛野想要，凛野得到！'), findsOneWidget);
+    expect(find.text('版本信息'), findsOneWidget);
+    expect(find.text('当前版本'), findsOneWidget);
+    expect(find.text('1.0.0+1'), findsOneWidget);
+    expect(find.text('感谢你使用我开发的HyperUSB！'), findsOneWidget);
+    expect(find.text('GitHub'), findsOneWidget);
+    expect(find.text('Email'), findsOneWidget);
+    expect(find.text('QQ'), findsOneWidget);
+
+    // Tap developer card 5 times to trigger easter egg
+    final devCard = find.text('Orynnx');
+    for (int i = 0; i < 5; i++) {
+      await tester.tap(devCard);
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    await tester.pumpAndSettle();
+
+    expect(find.text('补药点了！！！'), findsOneWidget);
+  });
 }
