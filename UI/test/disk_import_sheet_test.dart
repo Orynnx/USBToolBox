@@ -120,8 +120,8 @@ void main() {
     await tester.tap(find.text('delete linked'));
     await tester.pumpAndSettle();
 
-    expect(find.text('同时删除镜像文件'), findsNothing);
     expect(find.byType(CheckboxListTile), findsNothing);
+    expect(find.textContaining('不可删除'), findsNothing);
     expect(find.textContaining('linked.img'), findsOneWidget);
   });
 
@@ -149,7 +149,7 @@ void main() {
     await tester.tap(find.text('delete managed'));
     await tester.pumpAndSettle();
 
-    expect(find.text('同时删除镜像文件'), findsOneWidget);
-    expect(find.byType(CheckboxListTile), findsOneWidget);
+    expect(find.text('同时从存储中删除镜像文件', skipOffstage: false), findsOneWidget);
+    expect(find.byType(CheckboxListTile, skipOffstage: false), findsOneWidget);
   });
 }
