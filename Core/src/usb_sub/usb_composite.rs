@@ -18,8 +18,8 @@ use crate::usb_sub::usb_recovery::UsbRecoveryState;
 use crate::usb_sub::usb_serial::UsbSerial;
 use crate::usb_sub::usb_storage::UsbStorage;
 use crate::usb_sub::{
-    NetStatus, UsbError, UsbNcm, UsbResult, UsbUvc, UsbUvcRuntime, UvcConfig, UvcFormatKind,
-    NCM_INSTANCE, SYS_NET_PATH,
+    NetStatus, UsbError, UsbNcm, UsbResult, UsbUvc, UsbUvcRuntime, UvcFormatKind, NCM_INSTANCE,
+    SYS_NET_PATH,
 };
 
 const HID_INSTANCE: &str = "hid.hyperusb";
@@ -44,17 +44,18 @@ impl UsbComposite {
         &self.controller
     }
 
-    /// 将未绑定的持久 Gadget 调整到目标配置并绑定 UDC。
-    pub fn activate(
+    /// 将持久 Gadget 调整为目标配置，但保持 UDC 未绑定。
+    ///
+    /// UVC Runtime 必须在 UDC 绑定之前启动：这样内核创建 video 节点时，事件订阅者
+    /// 已经就绪，不会错过 Windows 枚举阶段的 Probe/Commit。
+    pub fn prepare(
         &self,
         profile: &UsbProfile,
         identity: &crate::usb_sub::GadgetIdentity,
-        udc: &str,
-        bind_timeout: Duration,
     ) -> UsbResult<()> {
         profile.validate()?;
         info!(
-            "Activating HyperUSB: boot_keyboard={}, serial={}, uvc_formats={}, ncm={}, storage_luns={}, udc={udc}",
+            "Preparing HyperUSB: boot_keyboard={}, serial={}, uvc_formats={}, ncm={}, storage_luns={}",
             profile.keyboard_enabled,
             profile.serial_enabled,
             profile.uvc.as_ref().map_or(0, |uvc| uvc.formats.len()),
@@ -104,12 +105,41 @@ impl UsbComposite {
                 self.controller.replace_function_link(STORAGE_INSTANCE)?;
             }
 
-            self.controller.log_uvc_bind_snapshot();
-            self.controller.sync_and_bind(udc, bind_timeout)
+            Ok(())
         })();
 
         if let Err(error) = result {
             warn!("HyperUSB activation failed; rolling back: {error}");
+            let rollback = self.deactivate();
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(UsbError::Unavailable(format!(
+                    "激活 USB 失败：{error}；回滚也失败：{rollback_error}"
+                ))),
+            };
+        }
+        Ok(())
+    }
+
+    /// 输出已准备完成后再绑定 UDC。
+    pub fn bind(&self, udc: &str, bind_timeout: Duration) -> UsbResult<()> {
+        self.controller.log_uvc_bind_snapshot();
+        self.controller.sync_and_bind(udc, bind_timeout)
+    }
+
+    /// 将未绑定的持久 Gadget 调整到目标配置并绑定 UDC。
+    ///
+    /// 仅供不需要 UVC Runtime 的调用方保持兼容；UVC 会话应使用 [`Self::prepare`]
+    /// 和 [`Self::bind`]，以便在绑定前建立 V4L2 事件处理线程。
+    pub fn activate(
+        &self,
+        profile: &UsbProfile,
+        identity: &crate::usb_sub::GadgetIdentity,
+        udc: &str,
+        bind_timeout: Duration,
+    ) -> UsbResult<()> {
+        self.prepare(profile, identity)?;
+        if let Err(error) = self.bind(udc, bind_timeout) {
             let rollback = self.deactivate();
             return match rollback {
                 Ok(()) => Err(error),
@@ -213,68 +243,21 @@ impl UsbSession {
         )?;
         let composite = UsbComposite::new(controller);
 
-        if let Err(error) = composite.activate(
-            &configuration.profile,
-            &configuration.identity,
+        let (uvc_runtime, net_status) = match Self::configure_composite_with_runtime(
+            &composite,
+            &configuration,
             &udc,
             config.udc_bind_timeout,
         ) {
-            let restore = android_lease.restore();
-            return match restore {
-                Ok(()) => Err(error),
-                Err(restore_error) => Err(UsbError::RestoreFailed(format!(
-                    "启动 HyperUSB 失败：{error}；恢复 Android USB 也失败：{restore_error}"
-                ))),
-            };
-        }
-
-        let net_status = match Self::resolve_net_status(&composite, &configuration.profile) {
-            Ok(status) => status,
+            Ok(result) => result,
             Err(error) => {
-                let deactivate = composite.deactivate();
                 let restore = android_lease.restore();
-                return match (deactivate, restore) {
-                    (Ok(()), Ok(())) => Err(error),
-                    (Err(deactivate_error), Ok(())) => Err(UsbError::RestoreFailed(format!(
-                        "读取 NCM Runtime 状态失败：{error}；停用 HyperUSB 失败：{deactivate_error}"
+                return match restore {
+                    Ok(()) => Err(error),
+                    Err(restore_error) => Err(UsbError::RestoreFailed(format!(
+                        "启动 HyperUSB 失败：{error}；恢复 Android USB 也失败：{restore_error}"
                     ))),
-                    (Ok(()), Err(restore_error)) => Err(UsbError::RestoreFailed(format!(
-                        "读取 NCM Runtime 状态失败：{error}；恢复 Android USB 也失败：{restore_error}"
-                    ))),
-                    (Err(deactivate_error), Err(restore_error)) => {
-                        Err(UsbError::RestoreFailed(format!(
-                            "读取 NCM Runtime 状态失败：{error}；停用 HyperUSB 失败：{deactivate_error}；恢复 Android USB 也失败：{restore_error}"
-                        )))
-                    }
                 };
-            }
-        };
-
-        let uvc_runtime = match UsbUvcRuntime::start(configuration.profile.uvc.as_ref()) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                // Runtime startup happens after ConfigFS activation. Always unbind the
-                // composite gadget before restoring Android's USB state.
-                let deactivate = composite.deactivate();
-                let restore = android_lease.restore();
-                match (deactivate, restore) {
-                    (Ok(()), Ok(())) => return Err(error),
-                    (Err(deactivate_error), Ok(())) => {
-                        return Err(UsbError::RestoreFailed(format!(
-                            "启动 UVC Runtime 失败：{error}；停用 HyperUSB 失败：{deactivate_error}"
-                        )));
-                    }
-                    (Ok(()), Err(restore_error)) => {
-                        return Err(UsbError::RestoreFailed(format!(
-                            "启动 UVC Runtime 失败：{error}；恢复 Android USB 也失败：{restore_error}"
-                        )));
-                    }
-                    (Err(deactivate_error), Err(restore_error)) => {
-                        return Err(UsbError::RestoreFailed(format!(
-                            "启动 UVC Runtime 失败：{error}；停用 HyperUSB 失败：{deactivate_error}；恢复 Android USB 也失败：{restore_error}"
-                        )));
-                    }
-                }
             }
         };
 
@@ -339,27 +322,32 @@ impl UsbSession {
 
     /// 在同一个 Daemon 会话中替换完整 USB 目标配置。
     ///
-    /// ConfigFS 只能在 UDC 未绑定时调整 Function；`activate` 已负责解绑、重建链接并
-    /// 重新绑定。新配置失败时先恢复旧配置；只有旧配置也失败时才恢复 Android USB。
+    /// ConfigFS 只能在 UDC 未绑定时调整 Function。重配前先关闭旧 UVC Runtime，随后
+    /// 准备描述符、启动新的 Runtime、最后绑定 UDC；新配置失败时恢复旧配置。
     pub fn reconfigure(&mut self, configuration: UsbConfiguration) -> UsbResult<()> {
         if matches!(self.state, UsbRuntimeState::Stopped) || self.android_lease.is_none() {
             return Err(UsbError::Unavailable("当前没有活动的 HyperUSB 会话".into()));
         }
         configuration.validate()?;
         let previous = self.configuration.clone();
-        if let Err(error) = self.composite.activate(
-            &configuration.profile,
-            &configuration.identity,
+        self.uvc_runtime.stop()?;
+        let (uvc_runtime, net_status) = match Self::configure_composite_with_runtime(
+            &self.composite,
+            &configuration,
             &self.udc,
             self.config.udc_bind_timeout,
         ) {
-            match self.composite.activate(
-                &previous.profile,
-                &previous.identity,
+            Ok(result) => result,
+            Err(error) => match Self::configure_composite_with_runtime(
+                &self.composite,
+                &previous,
                 &self.udc,
                 self.config.udc_bind_timeout,
             ) {
-                Ok(()) => return Err(error),
+                Ok((runtime, _)) => {
+                    self.uvc_runtime = runtime;
+                    return Err(error);
+                }
                 Err(rollback_error) => {
                     let stop_error = self.stop_inner().err();
                     return Err(UsbError::RestoreFailed(format!(
@@ -369,51 +357,11 @@ impl UsbSession {
                             .unwrap_or_default()
                     )));
                 }
-            }
-        }
-        let net_status = match Self::resolve_net_status(&self.composite, &configuration.profile) {
-            Ok(status) => status,
-            Err(error) => {
-                match self.composite.activate(
-                    &previous.profile,
-                    &previous.identity,
-                    &self.udc,
-                    self.config.udc_bind_timeout,
-                ) {
-                    Ok(()) => return Err(error),
-                    Err(rollback_error) => {
-                        let stop_error = self.stop_inner().err();
-                        return Err(UsbError::RestoreFailed(format!(
-                            "读取新 NCM Runtime 状态失败：{error}；旧配置恢复失败：{rollback_error}{}",
-                            stop_error
-                                .map(|value| format!("；Android USB 恢复也失败：{value}"))
-                                .unwrap_or_default()
-                        )));
-                    }
-                }
-            }
+            },
         };
-        if let Err(error) = self.sync_uvc_runtime(configuration.profile.uvc.as_ref()) {
-            let rollback = self.composite.activate(
-                &previous.profile,
-                &previous.identity,
-                &self.udc,
-                self.config.udc_bind_timeout,
-            );
-            if rollback.is_ok() {
-                let _ = self.sync_uvc_runtime(previous.profile.uvc.as_ref());
-                return Err(error);
-            }
-            let stop_error = self.stop_inner().err();
-            return Err(UsbError::RestoreFailed(format!(
-                "应用新 UVC Runtime 失败：{error}；恢复 HyperUSB 也失败：{rollback:?}{}",
-                stop_error
-                    .map(|value| format!("；停止会话也失败：{value}"))
-                    .unwrap_or_default()
-            )));
-        }
 
         self.configuration = configuration;
+        self.uvc_runtime = uvc_runtime;
         self.net_status = net_status;
         self.refresh_state();
         Ok(())
@@ -444,6 +392,37 @@ impl UsbSession {
         let ifname = composite.ncm_ifname(ncm)?;
         info!("CDC-NCM actual interface name: {ifname}");
         Ok(NetStatus::active(ncm, ifname))
+    }
+
+    /// 严格维持 UVC 的正确时序：Runtime 先于 UDC 绑定，且任何中途失败都会释放
+    /// V4L2 fd，再解除 ConfigFS Function。
+    fn configure_composite_with_runtime(
+        composite: &UsbComposite,
+        configuration: &UsbConfiguration,
+        udc: &str,
+        bind_timeout: Duration,
+    ) -> UsbResult<(UsbUvcRuntime, NetStatus)> {
+        composite.prepare(&configuration.profile, &configuration.identity)?;
+        let mut runtime = match UsbUvcRuntime::start(configuration.profile.uvc.as_ref()) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = composite.deactivate();
+                return Err(error);
+            }
+        };
+        if let Err(error) = composite.bind(udc, bind_timeout) {
+            let _ = runtime.stop();
+            let _ = composite.deactivate();
+            return Err(error);
+        }
+        match Self::resolve_net_status(composite, &configuration.profile) {
+            Ok(net_status) => Ok((runtime, net_status)),
+            Err(error) => {
+                let _ = runtime.stop();
+                let _ = composite.deactivate();
+                Err(error)
+            }
+        }
     }
 
     fn refresh_state(&mut self) {
@@ -496,8 +475,10 @@ impl UsbSession {
             return Ok(());
         }
 
-        let deactivate = self.composite.deactivate();
         let stop_uvc = self.uvc_runtime.stop();
+        // Release the V4L2 fd before ConfigFS removes the UVC function and
+        // invalidates its video node.
+        let deactivate = self.composite.deactivate();
         let restore = match self.android_lease.as_mut() {
             Some(lease) => lease.restore(),
             None => Ok(()),
@@ -537,18 +518,6 @@ impl UsbSession {
                     "停用 HyperUSB 失败：{deactivate_error}；恢复 Android USB 也失败：{restore_error}；停止 UVC Runtime 失败：{uvc_error}"
                 )),
             ),
-        }
-    }
-
-    fn sync_uvc_runtime(&mut self, config: Option<&UvcConfig>) -> UsbResult<()> {
-        match (self.uvc_runtime.is_active(), config) {
-            (true, Some(config)) => self.uvc_runtime.reconfigure(config),
-            (true, None) => self.uvc_runtime.stop(),
-            (false, Some(config)) => {
-                self.uvc_runtime = UsbUvcRuntime::start(Some(config))?;
-                Ok(())
-            }
-            (false, None) => Ok(()),
         }
     }
 }

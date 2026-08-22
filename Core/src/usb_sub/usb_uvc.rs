@@ -11,13 +11,12 @@ use crate::usb_sub::{UsbError, UsbResult, UvcConfig};
 
 const SPEEDS: [&str; 3] = ["fs", "hs", "ss"];
 
-// The V4L2 backend reports a 16 KiB UVC payload in Probe/Commit.  Advertise
-// the matching SuperSpeed isochronous endpoint capacity as well: 1024 byte
-// packets with a burst of 16 packets.  Keeping ConfigFS at its kernel default
-// (one 1024 byte packet) makes the descriptor internally inconsistent and
-// Windows rejects the camera before it sends STREAMON.
+// 3072 is encoded by f_uvc as three 1024-byte transactions per High-Speed
+// microframe. SuperSpeed additionally uses maxburst; Probe/Commit still reports
+// the selected alternate setting's per-interval value rather than the SS burst
+// aggregate.
 const STREAMING_INTERVAL: u8 = 1;
-const STREAMING_MAX_PACKET: u16 = 1024;
+const STREAMING_MAX_PACKET: u16 = 3072;
 const STREAMING_MAX_BURST: u8 = 15;
 
 /// 配置一个未链接、未绑定的 UVC Function。
@@ -38,11 +37,29 @@ impl UsbUvc {
             .map_err(|error| stage_error("clear_function", function_path, error))?;
         configure_transport(function_path)
             .map_err(|error| stage_error("configure_transport", function_path, error))?;
+        configure_controls(function_path)
+            .map_err(|error| stage_error("configure_controls", function_path, error))?;
         configure_formats(function_path, config)
             .map_err(|error| stage_error("configure_formats", function_path, error))?;
         configure_headers(function_path, config)
             .map_err(|error| stage_error("configure_headers", function_path, error))
     }
+}
+
+/// 不通告尚未实现的相机终端/处理单元控制项。
+///
+/// ConfigFS 未显式设置时，内核会默认通告自动曝光和亮度；Windows 随后会向控制
+/// 接口发起 SET_CUR。HyperUSB 当前只实现 Video Streaming 的 Probe/Commit，因此
+/// 必须把这两组位图清零，避免主机请求不存在的控制语义。
+fn configure_controls(function_path: &Path) -> UsbResult<()> {
+    write_text(
+        &function_path.join("control/terminal/camera/default/bmControls"),
+        "0x00",
+    )?;
+    write_text(
+        &function_path.join("control/processing/default/bmControls"),
+        "0x00",
+    )
 }
 
 fn configure_transport(function_path: &Path) -> UsbResult<()> {

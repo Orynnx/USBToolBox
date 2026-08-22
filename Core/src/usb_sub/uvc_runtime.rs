@@ -46,7 +46,9 @@ mod uvc_v4l2 {
 use uvc_v4l2::UvcV4l2Backend;
 
 const WORKER_SLEEP_MS: u64 = 20;
-const FRAME_QUEUE_CAPACITY: usize = 2;
+// Keep enough producer frames to prime every V4L2 MMAP buffer before the
+// kernel stream starts. Older frames are still discarded in favour of latency.
+const FRAME_QUEUE_CAPACITY: usize = 4;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 
@@ -118,13 +120,13 @@ impl fmt::Display for UvcActiveFormat {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct QueuedFrame {
     sequence: u64,
     timestamp_ns: u64,
     data_size: u32,
     flags: u32,
-    data: Vec<u8>,
+    data: Arc<[u8]>,
 }
 
 #[derive(Debug)]
@@ -501,7 +503,11 @@ fn attach_producer(
         .name("hyperusbd-uvc-producer".into())
         .spawn(move || {
             if let Err(error) = run_producer_session(&mut read_stream, &thread_state) {
-                warn!("UVC producer 会话异常：{error}");
+                if error.kind() == io::ErrorKind::UnexpectedEof {
+                    debug!("UVC producer 正常断开");
+                } else {
+                    warn!("UVC producer 会话异常：{error}");
+                }
             }
             let mut runtime = thread_state.lock().unwrap();
             let is_current = runtime
@@ -634,7 +640,7 @@ fn handle_frame_payload(state: &Arc<Mutex<RuntimeState>>, payload: &[u8]) -> io:
         timestamp_ns: frame.timestamp_ns,
         data_size: frame.data_size,
         flags: frame.flags,
-        data: data.to_vec(),
+        data: Arc::from(data),
     });
     debug!(
         "UVC Runtime 缓存帧 seq={} timestamp={}ns flags=0x{:08x} size={}",

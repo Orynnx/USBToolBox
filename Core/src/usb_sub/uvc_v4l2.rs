@@ -45,9 +45,14 @@ const UVC_GET_DEF: u8 = 0x87;
 const UVC_VS_PROBE_CONTROL: u8 = 0x01;
 const UVC_VS_COMMIT_CONTROL: u8 = 0x02;
 const UVC_STREAMING_CONTROL_SIZE: usize = 34;
-const UVC_DEFAULT_PAYLOAD_SIZE: u32 = 16 * 1024;
+const UVC_DEFAULT_PAYLOAD_SIZE: u32 = 3072;
 const UVC_SETUP_STALL: i32 = -51; // -EL2HLT, used by the kernel reference application.
 const UVC_FUNCTION_NAME: &str = "uvc.hyperusb";
+const CONFIGFS_GADGET_ROOT: &str = "/config/usb_gadget";
+const USB_TYPE_MASK: u8 = 0x60;
+const USB_TYPE_CLASS: u8 = 0x20;
+const USB_RECIPIENT_MASK: u8 = 0x1f;
+const USB_RECIPIENT_INTERFACE: u8 = 0x01;
 
 const VIDIOC_QUERYCAP: libc::c_int = ioc_read(b'V', 0, size_of::<V4l2Capability>()) as _;
 const VIDIOC_S_FMT: libc::c_int = ioc_read_write(b'V', 5, size_of::<V4l2Format>()) as _;
@@ -126,6 +131,9 @@ struct V4l2Buffer {
 #[derive(Clone, Copy)]
 struct V4l2Format {
     type_: u32,
+    // The v4l2_format union has 8-byte alignment on ARM64. This padding is
+    // part of the ioctl ABI: omitting it changes VIDIOC_S_FMT's encoded size.
+    _union_alignment: u32,
     raw: [u8; 200],
 }
 
@@ -149,6 +157,11 @@ struct V4l2EventSubscription {
 #[derive(Clone, Copy)]
 struct V4l2Event {
     type_: u32,
+    // `v4l2_event.u` contains `v4l2_event_ctrl`, whose value64 member gives
+    // the C union 8-byte alignment on ARM64. Without this explicit padding,
+    // `u.data` is read four bytes early and VIDIOC_DQEVENT gets the wrong
+    // ioctl structure size (128 rather than 136 bytes).
+    _union_alignment: u32,
     data: [u8; 64],
     pending: u32,
     sequence: u32,
@@ -156,6 +169,13 @@ struct V4l2Event {
     id: u32,
     reserved: [u32; 8],
 }
+
+const _: () = assert!(size_of::<V4l2Capability>() == 104);
+const _: () = assert!(size_of::<V4l2RequestBuffers>() == 20);
+const _: () = assert!(size_of::<V4l2Buffer>() == 88);
+const _: () = assert!(size_of::<V4l2Format>() == 208);
+const _: () = assert!(size_of::<V4l2StreamParm>() == 204);
+const _: () = assert!(size_of::<V4l2Event>() == 136);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -200,15 +220,32 @@ struct SelectedMode {
     active: UvcActiveFormat,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct UvcInterfaces {
+    control: u8,
+    streaming: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamState {
+    Idle,
+    /// The producer has been notified and buffers are waiting for the first frame.
+    Priming,
+    /// Every MMAP buffer was queued before VIDIOC_STREAMON.
+    Running,
+}
+
 /// V4L2 backend owned by the Runtime worker thread.
 pub(super) struct UvcV4l2Backend {
     device: Option<V4l2Device>,
     buffers: Vec<MappedBuffer>,
     available_buffers: VecDeque<usize>,
-    streaming: bool,
+    stream_state: StreamState,
+    last_frame: Option<super::QueuedFrame>,
     probe: [u8; UVC_STREAMING_CONTROL_SIZE],
     commit: [u8; UVC_STREAMING_CONTROL_SIZE],
     pending_control: Option<u8>,
+    interfaces: Option<UvcInterfaces>,
     next_open_attempt: Instant,
 }
 
@@ -218,13 +255,18 @@ impl UvcV4l2Backend {
             device: None,
             buffers: Vec::new(),
             available_buffers: VecDeque::new(),
-            streaming: false,
+            stream_state: StreamState::Idle,
+            last_frame: None,
             probe: [0; UVC_STREAMING_CONTROL_SIZE],
             commit: [0; UVC_STREAMING_CONTROL_SIZE],
             pending_control: None,
+            interfaces: None,
             next_open_attempt: Instant::now(),
         };
-        backend.open_device(state)?;
+        if let Err(error) = backend.open_device(state) {
+            debug!("UVC V4L2 video node 尚未就绪，将在后台重试：{error}");
+            backend.next_open_attempt = Instant::now() + Duration::from_millis(250);
+        }
         Ok(backend)
     }
 
@@ -245,16 +287,16 @@ impl UvcV4l2Backend {
             self.disconnect(state);
             return;
         }
-        if self.streaming {
-            if let Err(error) = self.reclaim_buffers() {
-                warn!("UVC V4L2 DQBUF 失败：{error}");
-                self.disconnect(state);
-                return;
-            }
-            if let Err(error) = self.submit_frames(state) {
-                warn!("UVC V4L2 QBUF 失败：{error}");
-                self.disconnect(state);
-            }
+        let stream_result = match self.stream_state {
+            StreamState::Idle => Ok(()),
+            StreamState::Priming => self.prime_stream(state),
+            StreamState::Running => self
+                .reclaim_buffers()
+                .and_then(|()| self.submit_frames(state)),
+        };
+        if let Err(error) = stream_result {
+            warn!("UVC V4L2 buffer 流程失败：{error}");
+            self.disconnect(state);
         }
     }
 
@@ -263,6 +305,7 @@ impl UvcV4l2Backend {
         self.buffers.clear();
         self.available_buffers.clear();
         self.device.take();
+        self.interfaces = None;
         self.next_open_attempt = Instant::now();
     }
 
@@ -271,15 +314,18 @@ impl UvcV4l2Backend {
         self.buffers.clear();
         self.available_buffers.clear();
         self.device.take();
+        self.interfaces = None;
     }
 
     fn open_device(
         &mut self,
         state: &std::sync::Arc<std::sync::Mutex<RuntimeState>>,
     ) -> UsbResult<()> {
+        let interfaces = find_uvc_interfaces()?;
         let device = find_uvc_video_device()?;
         subscribe_events(device.fd)?;
         self.device = Some(device);
+        self.interfaces = Some(interfaces);
         let default = state
             .lock()
             .map_err(|_| UsbError::Unavailable("UVC Runtime 状态锁已损坏".into()))?
@@ -292,8 +338,10 @@ impl UvcV4l2Backend {
             self.commit = self.probe;
         }
         info!(
-            "UVC V4L2 backend attached to {}",
-            self.device_path().display()
+            "UVC V4L2 backend attached to {} (VC={}, VS={})",
+            self.device_path().display(),
+            interfaces.control,
+            interfaces.streaming,
         );
         Ok(())
     }
@@ -349,54 +397,65 @@ impl UvcV4l2Backend {
         let request_type = request[0];
         let request_code = request[1];
         let value = u16::from_le_bytes([request[2], request[3]]);
+        let index = u16::from_le_bytes([request[4], request[5]]);
         let length = u16::from_le_bytes([request[6], request[7]]) as usize;
         let selector = (value >> 8) as u8;
+        let interface = index as u8;
 
+        // Every SETUP starts a new control transaction. Keeping a stale pending selector
+        // would make an unrelated control-interface DATA packet overwrite Probe/Commit.
+        self.pending_control = None;
         let mut response = UvcRequestData {
             length: UVC_SETUP_STALL,
             data: [0; 60],
         };
-        if request_code == UVC_SET_CUR
-            && (selector == UVC_VS_PROBE_CONTROL || selector == UVC_VS_COMMIT_CONTROL)
+        let interfaces = self.interfaces;
+        info!(
+            "UVC setup: type=0x{request_type:02x} request=0x{request_code:02x} selector=0x{selector:02x} interface={interface} length={length}"
+        );
+        if (request_type & USB_TYPE_MASK) == USB_TYPE_CLASS
+            && (request_type & USB_RECIPIENT_MASK) == USB_RECIPIENT_INTERFACE
         {
-            self.pending_control = Some(selector);
-            response.length = UVC_STREAMING_CONTROL_SIZE as i32;
-        } else if matches!(
-            request_code,
-            UVC_GET_CUR
-                | UVC_GET_MIN
-                | UVC_GET_MAX
-                | UVC_GET_RES
-                | UVC_GET_LEN
-                | UVC_GET_INFO
-                | UVC_GET_DEF
-        ) {
-            self.fill_get_response(selector, request_code, length, state, &mut response);
-        }
-
-        // Only streaming class requests are meaningful for this Core. A normal UVC
-        // control-terminal GET_INFO/SET_CUR still receives a harmless capability response.
-        if selector != UVC_VS_PROBE_CONTROL && selector != UVC_VS_COMMIT_CONTROL {
-            match request_code {
-                UVC_SET_CUR => {
-                    self.pending_control = None;
-                    response.length = min_response_length(length, 60);
-                }
-                UVC_GET_INFO => {
+            match interfaces {
+                Some(interfaces) if interface == interfaces.control => {
+                    // We intentionally advertise no VC controls. Keep this conservative
+                    // response for hosts that query a generic control capability anyway.
                     response.data[0] = 0x03;
-                    response.length = min_response_length(length, 1);
-                }
-                UVC_GET_CUR | UVC_GET_MIN | UVC_GET_MAX | UVC_GET_RES | UVC_GET_LEN
-                | UVC_GET_DEF => {
                     response.length = min_response_length(length, 60);
+                }
+                Some(interfaces) if interface == interfaces.streaming => {
+                    if request_code == UVC_SET_CUR
+                        && (selector == UVC_VS_PROBE_CONTROL || selector == UVC_VS_COMMIT_CONTROL)
+                    {
+                        self.pending_control = Some(selector);
+                        // For SET_CUR OUT this tells f_uvc exactly how many bytes will
+                        // arrive in the matching UVC_EVENT_DATA.
+                        response.length = UVC_STREAMING_CONTROL_SIZE as i32;
+                    } else if matches!(
+                        request_code,
+                        UVC_GET_CUR
+                            | UVC_GET_MIN
+                            | UVC_GET_MAX
+                            | UVC_GET_RES
+                            | UVC_GET_LEN
+                            | UVC_GET_INFO
+                            | UVC_GET_DEF
+                    ) && (selector == UVC_VS_PROBE_CONTROL
+                        || selector == UVC_VS_COMMIT_CONTROL)
+                    {
+                        self.fill_get_response(
+                            selector,
+                            request_code,
+                            length,
+                            state,
+                            &mut response,
+                        );
+                    }
                 }
                 _ => {}
             }
         }
-
-        // bRequestType's direction is handled by f_uvc. For SET_CUR OUT the response length
-        // tells the driver how many bytes to receive before emitting UVC_EVENT_DATA.
-        let _ = request_type;
+        info!("UVC setup response length={}", response.length);
         self.ioctl(UVCIOC_SEND_RESPONSE, &mut response)
     }
 
@@ -520,6 +579,7 @@ impl UvcV4l2Backend {
         let normalized = control_for_mode(&selected);
         if selector == UVC_VS_PROBE_CONTROL {
             self.probe = normalized;
+            info!("UVC Probe accepted: {:?}", selected.active);
             return Ok(());
         }
 
@@ -533,6 +593,7 @@ impl UvcV4l2Backend {
         if let Some(writer) = &runtime.producer {
             let _ = send_format(writer, selected.active);
         }
+        info!("UVC Commit accepted: {:?}", runtime.negotiated_format);
         Ok(())
     }
 
@@ -540,30 +601,32 @@ impl UvcV4l2Backend {
         &mut self,
         state: &std::sync::Arc<std::sync::Mutex<RuntimeState>>,
     ) -> io::Result<()> {
-        if self.streaming {
+        if self.stream_state != StreamState::Idle {
             return Ok(());
         }
         self.allocate_buffers()?;
-        let mut buffer_type = VIDEO_OUTPUT;
-        self.ioctl(VIDIOC_STREAMON, &mut buffer_type)?;
-        self.streaming = true;
         let mut runtime = state
             .lock()
             .map_err(|_| io::Error::other("UVC Runtime 状态锁已损坏"))?;
         runtime.stream_on = true;
+        runtime.pending_frames.clear();
         if let Some(writer) = &runtime.producer {
             let _ = send_stream(writer, true);
         }
-        info!("UVC Host STREAMON");
+        self.stream_state = StreamState::Priming;
+        info!(
+            "UVC Host STREAMON：等待 producer 首帧以预填 {} 个 MMAP buffer",
+            self.buffers.len()
+        );
         Ok(())
     }
 
     fn stop_stream(&mut self, state: &std::sync::Arc<std::sync::Mutex<RuntimeState>>) {
-        if self.streaming {
+        if self.stream_state == StreamState::Running {
             let mut buffer_type = VIDEO_OUTPUT;
             let _ = self.ioctl(VIDIOC_STREAMOFF, &mut buffer_type);
-            self.streaming = false;
         }
+        self.stream_state = StreamState::Idle;
         self.release_buffers();
         if let Ok(mut runtime) = state.lock() {
             runtime.stream_on = false;
@@ -573,6 +636,43 @@ impl UvcV4l2Backend {
             }
         }
         info!("UVC Host STREAMOFF");
+    }
+
+    fn prime_stream(
+        &mut self,
+        state: &std::sync::Arc<std::sync::Mutex<RuntimeState>>,
+    ) -> io::Result<()> {
+        let frame = {
+            let mut runtime = state
+                .lock()
+                .map_err(|_| io::Error::other("UVC Runtime 状态锁已损坏"))?;
+            let frame = runtime.pending_frames.pop_back();
+            runtime.pending_frames.clear();
+            frame
+        };
+        let Some(frame) = frame else {
+            return Ok(());
+        };
+
+        self.last_frame = Some(frame.clone());
+        while let Some(index) = self.available_buffers.pop_front() {
+            if let Err(error) = self.queue_buffer(index, &frame) {
+                self.available_buffers.push_front(index);
+                return Err(error);
+            }
+        }
+        if self.buffers.is_empty() {
+            return Err(io::Error::other("UVC V4L2 没有可启动的 MMAP buffer"));
+        }
+
+        let mut buffer_type = VIDEO_OUTPUT;
+        self.ioctl(VIDIOC_STREAMON, &mut buffer_type)?;
+        self.stream_state = StreamState::Running;
+        info!(
+            "UVC V4L2 已预填并排队 {} 个 MMAP buffer，随后执行 VIDIOC_STREAMON",
+            self.buffers.len()
+        );
+        Ok(())
     }
 
     fn allocate_buffers(&mut self) -> io::Result<()> {
@@ -624,6 +724,7 @@ impl UvcV4l2Backend {
     fn release_buffers(&mut self) {
         self.available_buffers.clear();
         self.buffers.clear();
+        self.last_frame = None;
         if self.device.is_some() {
             let mut request = V4l2RequestBuffers {
                 count: 0,
@@ -661,42 +762,20 @@ impl UvcV4l2Backend {
         state: &std::sync::Arc<std::sync::Mutex<RuntimeState>>,
     ) -> io::Result<()> {
         while let Some(index) = self.available_buffers.pop_front() {
-            let frame = {
+            let next_frame = {
                 let mut runtime = state
                     .lock()
                     .map_err(|_| io::Error::other("UVC Runtime 状态锁已损坏"))?;
                 runtime.pending_frames.pop_front()
             };
-            let Some(frame) = frame else {
+            if let Some(frame) = next_frame {
+                self.last_frame = Some(frame);
+            }
+            let Some(frame) = self.last_frame.clone() else {
                 self.available_buffers.push_front(index);
                 break;
             };
-            let Some(buffer) = self.buffers.get(index) else {
-                continue;
-            };
-            if frame.data.len() > buffer.length {
-                warn!(
-                    "UVC 帧超过 V4L2 buffer：frame={} buffer={}",
-                    frame.data.len(),
-                    buffer.length
-                );
-                self.available_buffers.push_back(index);
-                continue;
-            }
-            // SAFETY: the frame is copied into the exact MMAP range returned by QUERYBUF.
-            unsafe {
-                ptr::copy_nonoverlapping(frame.data.as_ptr(), buffer.address, frame.data.len());
-            }
-            let mut v4l2_buffer: V4l2Buffer = unsafe { zeroed() };
-            v4l2_buffer.index = index as u32;
-            v4l2_buffer.type_ = VIDEO_OUTPUT;
-            v4l2_buffer.bytesused = frame.data.len() as u32;
-            v4l2_buffer.field = FIELD_NONE;
-            v4l2_buffer.memory = MEMORY_MMAP;
-            v4l2_buffer.sequence = frame.sequence as u32;
-            v4l2_buffer.timestamp.tv_sec = (frame.timestamp_ns / 1_000_000_000) as _;
-            v4l2_buffer.timestamp.tv_usec = ((frame.timestamp_ns % 1_000_000_000) / 1_000) as _;
-            if let Err(error) = self.ioctl(VIDIOC_QBUF, &mut v4l2_buffer) {
+            if let Err(error) = self.queue_buffer(index, &frame) {
                 self.available_buffers.push_front(index);
                 return Err(error);
             }
@@ -704,9 +783,42 @@ impl UvcV4l2Backend {
         Ok(())
     }
 
+    fn queue_buffer(&self, index: usize, frame: &super::QueuedFrame) -> io::Result<()> {
+        let buffer = self
+            .buffers
+            .get(index)
+            .ok_or_else(|| io::Error::other("UVC V4L2 buffer index 越界"))?;
+        if frame.data.len() > buffer.length {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "UVC 帧超过 V4L2 buffer：frame={} buffer={}",
+                    frame.data.len(),
+                    buffer.length
+                ),
+            ));
+        }
+
+        // SAFETY: the frame is copied into the exact MMAP range returned by QUERYBUF.
+        unsafe {
+            ptr::copy_nonoverlapping(frame.data.as_ptr(), buffer.address, frame.data.len());
+        }
+        let mut v4l2_buffer: V4l2Buffer = unsafe { zeroed() };
+        v4l2_buffer.index = index as u32;
+        v4l2_buffer.type_ = VIDEO_OUTPUT;
+        v4l2_buffer.bytesused = frame.data.len() as u32;
+        v4l2_buffer.field = FIELD_NONE;
+        v4l2_buffer.memory = MEMORY_MMAP;
+        v4l2_buffer.sequence = frame.sequence as u32;
+        v4l2_buffer.timestamp.tv_sec = (frame.timestamp_ns / 1_000_000_000) as _;
+        v4l2_buffer.timestamp.tv_usec = ((frame.timestamp_ns % 1_000_000_000) / 1_000) as _;
+        self.ioctl(VIDIOC_QBUF, &mut v4l2_buffer)
+    }
+
     fn set_video_format(&mut self, format: &UvcActiveFormat) -> io::Result<()> {
         let mut value = V4l2Format {
             type_: VIDEO_OUTPUT,
+            _union_alignment: 0,
             raw: [0; 200],
         };
         set_u32(&mut value.raw, 0, format.width);
@@ -764,6 +876,7 @@ impl UvcV4l2Backend {
         self.buffers.clear();
         self.available_buffers.clear();
         self.device.take();
+        self.interfaces = None;
         self.next_open_attempt = Instant::now() + Duration::from_millis(250);
     }
 }
@@ -854,6 +967,49 @@ fn find_uvc_video_device() -> UsbResult<V4l2Device> {
     Err(UsbError::Unavailable(format!(
         "找不到 function_name={UVC_FUNCTION_NAME} 的 V4L2 output 节点；请确认内核启用了 USB_CONFIGFS_F_UVC/USB_F_UVC"
     )))
+}
+
+/// 读取当前 ConfigFS Function 分配的接口号，而非假定 VC/VS 固定为 0/1。
+///
+/// UVC Function 可以和 HID、ACM、NCM 等任意组合，接口编号由链接顺序决定。只有
+/// 将 SETUP 的 wIndex 与这里的实际编号对齐，才能避免把 VC 请求误解为 VS 的
+/// Probe/Commit。
+fn find_uvc_interfaces() -> UsbResult<UvcInterfaces> {
+    let root = Path::new(CONFIGFS_GADGET_ROOT);
+    let entries = fs::read_dir(root).map_err(|error| {
+        UsbError::Unavailable(format!(
+            "无法枚举 UVC ConfigFS Gadget 根目录 {}：{error}",
+            root.display()
+        ))
+    })?;
+    for entry in entries.flatten() {
+        let function = entry.path().join("functions").join(UVC_FUNCTION_NAME);
+        let control = function.join("control/bInterfaceNumber");
+        let streaming = function.join("streaming/bInterfaceNumber");
+        if !control.is_file() || !streaming.is_file() {
+            continue;
+        }
+        return Ok(UvcInterfaces {
+            control: read_interface_number(&control)?,
+            streaming: read_interface_number(&streaming)?,
+        });
+    }
+    Err(UsbError::Unavailable(format!(
+        "未找到 UVC Function {UVC_FUNCTION_NAME} 的 ConfigFS 接口号"
+    )))
+}
+
+fn read_interface_number(path: &Path) -> UsbResult<u8> {
+    let value = fs::read_to_string(path).map_err(|error| {
+        UsbError::Unavailable(format!("读取 UVC 接口号 {} 失败：{error}", path.display()))
+    })?;
+    value.trim().parse::<u8>().map_err(|error| {
+        UsbError::Unavailable(format!(
+            "解析 UVC 接口号 {} 的值 {:?} 失败：{error}",
+            path.display(),
+            value.trim()
+        ))
+    })
 }
 
 fn read_function_name(path: &Path) -> io::Result<Option<String>> {
